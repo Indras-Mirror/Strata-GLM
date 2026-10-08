@@ -199,3 +199,8 @@ NOT measured yet: anything on the real model.
 - From strata-ds4-gpu (DS4 measurements, to port): soft prune `--prune-penalty 0.5` + `--arena-adapt` (pruned experts
   read from NVMe on demand into an LRU arena slot) keeps languages: ppl +0.3% overall, German +3.9% (hard +72%), decode
   +10%. GLM has both flags; next GPU block tests them with an en+zh+code+tools calibration list.
+
+## s9 (2026-10-09 06:08): 524288-token context, 50K-token prefill + decode at 50K depth
+- REAP 25% prune, chunk 1024, margin 5.5 (734 VRAM slots): **prefill 50000 tokens in 217.8 s = 229.6 tok/s**
+  (attention+router 43 s, experts 169 s); **decode at 50K depth 8.23 tok/s** (attention+router 20.6 ms/token vs
+  ~22 at 2K) - long context costs almost nothing in decode. Log: bench/glm-2026-10-09/long50k.log.
