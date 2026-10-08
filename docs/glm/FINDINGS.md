@@ -169,3 +169,33 @@ NOT measured yet: anything on the real model.
 
   Decode 1.75 (yesterday) -> 10.4 lossless-ish (prune 25%) -> 16.4 with skip 0.10. The margin-1 VRAM cache (hit
   35.8% vs 29% at margin 5.5) is worth ~1 tok/s: re-seeding the cache bigger after a chunked prefill is a TODO.
+
+## s8 (2026-10-09 morning): lightning indexer IN (long context), shared-allocator bug fixed
+- **Lightning indexer** (`GlmDense`, MLA layers; glm5-next.cpp build_kpool_select semantics): pooled-key cache
+  `ipool` F16 [128, ctx/4+1] (pool p = tokens 4p..4p+3: LayerNorm(indexer.attn_k x) mixed by a per-channel softmax over
+  the 4 of compressor_gate x + ape), carry `itail` [256, 3] across passes; score = ggml_lightning_indexer (128 x 32 heads,
+  wmma), pool visible iff 4p+3 <= t (step mask on GPU), top-512 pools (CUB top_k) + incomplete tail, dead slots to
+  per-slot dump rows, F16 additive mask via set_rows -> flash_attn. Below idx_top_k positions the dense causal path
+  runs (exact and cheaper); the pool cache is updated on every pass either way. `--allow-long-ctx` = force dense.
+  Context is no longer capped at 2051: `--ctx N` sizes the latent cache (N=524288 -> ~6 GB VRAM).
+- **CPU gate** (`bench/glm-2026-10-09/gate_indexer.sh`, mini fixture, idx_top_k 8): G1 indexer == dense at 11 tokens
+  (max|d| 0), G2 differs at 30, G3/G4 chunk 7 / chunk 5 == one-token loop (0), G5 dense chunk == dense loop (0); clean
+  under AddressSanitizer (`build-glm-asan`). Mutation (tail off by one) -> G1 4.49 + G4 0.354 FAIL. Indexer SCORING is
+  not gated against the fork yet (`~/AI/llama.cpp-glm53` patched: `GLM_NO_FUSED_LID=1` disables its fused indexer so
+  its CPU build can run the fixture - rebuild + compare = TODO).
+- **Real model, 2300-token prompt crossing 2048** (REAP 25%, chunk 1024): indexer ppl 4.3780 vs forced dense 4.3765
+  (+0.03%; ~250 of 2300 positions dropped per token at the end), prefill 156 tok/s, decode 8.5 tok/s (margin 5.5).
+- **BUG FIXED - shared gallocr stale pointers:** gallocr treats a tensor with ->data set as externally allocated, so
+  after the shared chunk allocator's buffer grew, earlier chunk graphs kept pointers into freed memory (CPU: heap
+  corruption with chunks > 4 tokens; GPU: silent). `Impl::alloc` now nulls data/buffer of every graph tensor not in a
+  persistent buffer before re-planning (pointer compare only - the stale buffer must not be dereferenced). The
+  chunked-prefill numbers of s7 ran with this bug: neutral ppl moved 19.33 -> 18.47 after the fix (loop 20.46) - the
+  remaining chunk-vs-loop gap is GPU-only (CPU fixture is bit-exact) -> MMQ vs CPU-pool expert numerics or batched FA;
+  **open, needs the fork oracle**. Prune-sweep conclusions (relative) stand; absolute chunked ppl should be re-taken.
+- **BUG FIXED - flash_attn mask stride:** CUDA FA with 512-wide heads needs every mask stride % 16 bytes; the indexer
+  mask rows are cap + nsel halfs -> padded to a multiple of 8.
+- **524288-token context allocates** (11.15 GiB free after the dense half -> 734 expert slots at margin 5.5, REAP 25%
+  fully resident, arena 69.2 GiB). 50K-token prefill + decode at that depth: see s9 / bench/glm-2026-10-09/long50k.log.
+- From strata-ds4-gpu (DS4 measurements, to port): soft prune `--prune-penalty 0.5` + `--arena-adapt` (pruned experts
+  read from NVMe on demand into an LRU arena slot) keeps languages: ppl +0.3% overall, German +3.9% (hard +72%), decode
+  +10%. GLM has both flags; next GPU block tests them with an en+zh+code+tools calibration list.

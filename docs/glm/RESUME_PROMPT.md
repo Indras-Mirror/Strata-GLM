@@ -17,7 +17,25 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
 `docs/glm/FINDINGS.md`; then the DS4 docs we build on: `docs/ds4/RESUME_PROMPT.md` (rules, gates, lessons),
 `docs/ds4/ENGINE_DENSE.md`, `docs/ds4/ENGINE_MOE.md`; `git log --oneline -15`.
 
-## State (2026-10-08 night) - **CURRENT, read this first**
+## State (2026-10-09 morning) - **CURRENT, read this first**
+- Public repo: github.com/Indras-Mirror/Strata-GLM (remote `glm`, branch glm -> main). Mal: English + Chinese (+code)
+  are what matter. GPU is SHARED with `strata-ds4-gpu` over the relay MCP: blocks <= 10 min, ask/announce, kill exact
+  PIDs only (pkill/pgrep -f matched this shell twice), CPU tests niced with --threads 2 while DS4 benchmarks.
+- FINDINGS s7-s8: routing is flat -> residency is what counts. Done: exclusive byte-sized VRAM/arena residency,
+  chunked prefill (GlmDense passes <= 4096), REAP saliency + `--prune` / `--prune-penalty`, `--skip-miss`, lightning
+  indexer (long context; 524K allocates), shared-allocator stale-pointer fix, FA mask-stride fix.
+- Numbers (REAP 25%, fully resident): prefill 156-175 tok/s (chunk 1024), decode 8.5-10.4 tok/s (16.4 with
+  --skip-miss 0.10, +4% ppl). Hard prune hurts uncalibrated languages (German -18..-29%).
+- **Next (in order):** (1) port DS4's soft prune: `--prune-penalty 0.5 --arena-adapt` with an en+zh+code+tools
+  calibration list (cal_code, cal_prose, cal_multi, cal_chat, cal_python, cal_json); eval code/chat/German.
+  (2) Fork oracle: rebuild ~/AI/llama.cpp-glm53 CPU (patched, `GLM_NO_FUSED_LID=1`) and compare indexer scoring on the
+  mini fixture past 11 tokens; then the GPU chunk-vs-loop ppl gap (18.47 vs 20.46 on neutral, CPU fixture exact).
+  (3) Long context: 50K prefill result (long50k.log), then prefill 25% of 200K/500K; decode at depth; consider a gather
+  path for decode (masked FA reads the whole latent cache). (4) Re-seed the VRAM cache after chunked prefill (margin
+  5.5 costs ~500 slots / ~1 tok/s). (5) Abliteration: transplant drowzeys' 30 o_proj tensors (L15-43 + MTP) -> Q4_K
+  attn_output, instead of the expert LoRA. (6) Bigger chunks (4096) for 300-500+ prefill.
+
+## State (2026-10-08 night) - **superseded by 2026-10-09**
 - **LATE UPDATE (FINDINGS s6)**: `--lora` is wired for the DENSE half and **verified active** (adapter changes
   generation; `logits[0]` max|d| 2.14); the routed-expert LoRA is still NOT wired (not abliterated). A real-prompt
   warm-cache A/B measured **cold 1.75 -> warm 1.88 tok/s decode (+7% only)** - the arena caps at ~55% of the 12096

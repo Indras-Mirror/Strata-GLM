@@ -5,8 +5,8 @@ A GLM-5.3-Flash engine built on <a href="https://github.com/Niko1221/Strata">Str
 <a href="https://github.com/Indras-Mirror/Strata-DS4">Strata-DS4</a> · Linux · NVIDIA · MIT</p>
 
 > **Status: early, experimental research code.** It runs the real model end to end and the numbers below are measured,
-> but it has been run on exactly one PC, context is limited to **2,051 tokens** until the lightning indexer lands
-> (in progress), there is no server or chat UI, and quality has only been checked with perplexity. The DS4 README this
+> but it has been run on exactly one PC, long context (lightning indexer, landed 2026-10-09; a 524K context
+> allocates) is only lightly tested, there is no server or chat UI, and quality has only been checked with perplexity. The DS4 README this
 > branch grew from is [README.ds4.md](README.ds4.md); upstream Strata's is [README.strata.md](README.strata.md).
 
 ## What this is
@@ -68,7 +68,8 @@ Token ids in, token ids out (HF `tokenizers` on the upstream `tokenizer.json`). 
 
 ## Roadmap
 
-Lightning indexer (long context: the KDA layers keep constant state, so 200K-500K is the goal), larger prefill chunks,
+Long-context testing (the lightning indexer is in; KDA layers keep constant state, so 200K-500K is the goal), soft
+pruning + on-demand reads (keeps uncalibrated languages), larger prefill chunks,
 re-seeding the VRAM cache after prefill, abliteration via an `attn_output` transplant, MTP, a server.
 
 ## Credits

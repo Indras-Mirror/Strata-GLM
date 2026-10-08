@@ -83,6 +83,9 @@ std::string read_geometry(const GgufFile & f, GlmGeometry & g) {
         { "attention.q_lora_rank", &g.q_lora, nullptr, true }, { "attention.kv_lora_rank", &g.kv_lora, nullptr, true },
         { "attention.key_length_mla", &g.k_mla, nullptr, true }, { "attention.value_length_mla", &g.v_mla, nullptr, true },
         { "attention.indexer.top_k", &g.idx_top_k, nullptr, true }, { "attention.indexer.kpool", &g.idx_kpool, nullptr, true },
+        { "attention.indexer.head_count", &g.idx_heads, nullptr, true },
+        { "attention.indexer.key_length", &g.idx_dim, nullptr, true },
+        { "attention.layer_norm_epsilon", nullptr, &g.ln_eps, false },
         { "expert_count", &g.n_expert, nullptr, true },      { "expert_used_count", &g.n_expert_used, nullptr, true },
         { "expert_feed_forward_length", &g.n_ff_exp, nullptr, true },
         { "leading_dense_block_count", &g.n_dense_lead, nullptr, true },
@@ -145,11 +148,10 @@ bool ends_with(const std::string & s, const char * suf) {
     return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
 }
 
-// Not loaded: the routed experts (the tier's), the indexer (phase 1), the MTP block.  Off-CPU also token_embd (looked
+// Not loaded: the routed experts (the tier's), the MTP block.  Off-CPU also token_embd (looked
 // up on the host).
 bool skip_weight(const std::string & n, bool cpu, bool skip_experts, int64_t n_layer) {
     if (skip_experts && ends_with(n, "_exps.weight")) return true;
-    if (n.find("indexer") != std::string::npos) return true;
     if (n.rfind("blk.", 0) == 0 && std::atoll(n.c_str() + 4) >= n_layer) return true;
     return !cpu && n == "token_embd.weight";
 }
@@ -249,6 +251,7 @@ struct GlmDense::Impl {
 
     int64_t D = 0, HC = 0, NH = 0, SK = 0, DI = 0, DC = 0, KVL = 0, KM = 0, VM = 0;
     int64_t NEXP = 0, NUSED = 0, NT = 1, CAPMAX = 0;
+    int64_t KP = 4, IDXD = 128, IDXH = 32, PCAP = 0, NNEW = 1, MCAP = 0;   // indexer; MCAP = rows of i_mask per token
 
     ggml_context * sctx = nullptr;   // persistent state (sbuf)
     ggml_backend_buffer_t sbuf = nullptr;
@@ -267,7 +270,11 @@ struct GlmDense::Impl {
 
     // inputs (one upload per pass): MLA write slots + causal mask, per-layer route bias
     ggml_tensor * i_slot = nullptr;      // I32 [NT]
-    ggml_tensor * i_mask = nullptr;      // F16 [CAPMAX * NT], viewed [cap, n]
+    ggml_tensor * i_mask = nullptr;      // F16 [MCAP * NT], viewed [cap, n] (dense attention only)
+    ggml_tensor * i_tpos = nullptr;      // F32 [NT] positions (indexer pool visibility)
+    ggml_tensor * i_newidx = nullptr;    // I32 [KP * NNEW] members of the pools this pass completes (into [tail | pass])
+    ggml_tensor * i_newdst = nullptr;    // I32 [NNEW] their pool rows (PCAP = dump)
+    ggml_tensor * i_tail = nullptr;      // F32 [(KP - 1) * NT] incomplete-pool cells per token (dump when absent)
     ggml_tensor * i_span = nullptr;
     std::vector<uint8_t> in_host;
     uint8_t * in_base = nullptr;
@@ -278,7 +285,7 @@ struct GlmDense::Impl {
 
     int64_t o_blk = 0, o_ids_off = 0, o_wts_off = 0;
 
-    struct Var { int64_t cap = 0, n = 1; ggml_cgraph * gf = nullptr; ggml_gallocr_t allo = nullptr; };
+    struct Var { int64_t cap = 0, n = 1; bool idx = false; ggml_cgraph * gf = nullptr; ggml_gallocr_t allo = nullptr; };
     struct Layer {
         bool kda = false, routed = false;
         // KDA
@@ -286,6 +293,10 @@ struct GlmDense::Impl {
         ggml_tensor * S = nullptr;       // [SK, SK, NH] recurrent state
         // MLA
         ggml_tensor * kvc = nullptr;     // F16 [KVL, CAPMAX] latent cache
+        // lightning indexer: pooled keys (row p = pool p's key, row PCAP = dump) and the last kpool-1 tokens'
+        // [key | gate] rows (the members a later pass completes a pool with)
+        ggml_tensor * ipool = nullptr;   // F16 [IDXD, PCAP + 1]
+        ggml_tensor * itail = nullptr;   // F32 [2 * IDXD, KP - 1]
         // hand-offs
         ggml_tensor * hap = nullptr;     // [D, HC, NT]
         ggml_tensor * post_f = nullptr;  // [HC, NT]
@@ -321,7 +332,25 @@ struct GlmDense::Impl {
     // a shared allocator re-plans every call (its buffer may grow and move, and the graphs overlap in it); the
     // per-graph ones plan once (alloc_graph's uid stamp lets ggml-cuda reuse the captured CUDA graph)
     bool alloc(ggml_gallocr_t a, ggml_cgraph * g) {
-        if (a == allo_big || a == allo_rows) return ggml_gallocr_alloc_graph(a, g);
+        if (a == allo_big || a == allo_rows) {
+            // gallocr treats a tensor with data as allocated elsewhere: forget the pointers the last plan gave this
+            // graph's own tensors (they point into a compute buffer that a later, bigger plan may have freed)
+            // (compare pointers only: a stale buffer pointer must not be dereferenced)
+            auto persistent = [&](ggml_backend_buffer_t bb) {
+                if (bb == sbuf || bb == ibuf || bb == obuf || bb == lbuf) return true;
+                for (ggml_backend_buffer_t wb : w.bufs) if (bb == wb) return true;
+                return false;
+            };
+            auto forget = [&](ggml_tensor * t) {
+                if (t->buffer && !persistent(t->buffer)) {
+                    t->data = nullptr;
+                    t->buffer = nullptr;
+                }
+            };
+            for (int i = 0; i < g->n_nodes; ++i) forget(g->nodes[i]);
+            for (int i = 0; i < g->n_leafs; ++i) forget(g->leafs[i]);
+            return ggml_gallocr_alloc_graph(a, g);
+        }
         return alloc_graph(a, g);
     }
     ggml_gallocr_t allo_for(int64_t n) {
@@ -361,6 +390,10 @@ struct GlmDense::Impl {
         if (own_backend && backend) ggml_backend_free(backend);
     }
 
+    // MLA through the lightning indexer once a token can see more than idx_top_k earlier positions (below that the
+    // selection is every position, i.e. the dense causal attention - exact, and cheaper)
+    bool use_idx(int64_t pos_last) const { return !allow_long && pos_last >= g.idx_top_k; }
+    int64_t n_top_pools(int64_t cap) const { return std::min<int64_t>(cap / KP, g.idx_top_k / KP); }
     int64_t cap_for(int64_t pos_last) const {
         const int64_t c = std::max<int64_t>(cpu ? 16 : 256, next_pow2(pos_last + 1));
         return std::min<int64_t>(c, CAPMAX);
@@ -449,7 +482,7 @@ ggml_tensor * kda_conv(B & b, ggml_cgraph * gf, ggml_tensor * x, ggml_tensor * p
 }  // namespace
 
 // attention (KDA or MLA) + ffn hyper-connection + ffn_norm + router / shared expert (or dense FFN), n tokens
-static ggml_cgraph * build_attn(GlmDense::Impl & im, int il, int64_t cap, int64_t n) {
+static ggml_cgraph * build_attn(GlmDense::Impl & im, int il, int64_t cap, int64_t n, bool idx) {
     GlmDense::Impl::Layer & L = im.ly[(size_t) il];
     ggml_context * gc = im.gctx;
     ggml_cgraph * gf = ggml_new_graph_custom(gc, 2048, false);
@@ -502,7 +535,62 @@ static ggml_cgraph * build_attn(GlmDense::Impl & im, int il, int64_t cap, int64_
         ggml_tensor * kv = b.rms_w(ggml_mul_mat(gc, b.BL(il, "attn_kv_a_mqa.weight"), xn), b.BL(il, "attn_kv_a_norm.weight"));
         ggml_tensor * kvc2 = ggml_set_rows(gc, L.kvc, kv, ggml_view_1d(gc, im.i_slot, n, 0));
         ggml_tensor * kview = ggml_view_3d(gc, kvc2, im.KVL, cap, 1, kvc2->nb[1], kvc2->nb[1] * cap, 0);
-        ggml_tensor * mask = ggml_reshape_2d(gc, ggml_view_1d(gc, im.i_mask, cap * n, 0), cap, n);
+        // ---- lightning indexer (glm5-next.cpp build_kpool_select).  The pooled-key cache is kept up to date on
+        // every pass, the selection only runs past idx_top_k positions.
+        const int64_t KP = im.KP, ID = im.IDXD, NW = im.NNEW;
+        ggml_tensor * ik = ggml_norm(gc, ggml_mul_mat(gc, b.BL(il, "indexer.attn_k.weight"), xn), (float) im.g.ln_eps);
+        ik = ggml_add(gc, ggml_mul(gc, ik, b.BL(il, "indexer.k_norm.weight")), b.BL(il, "indexer.k_norm.bias"));
+        ggml_tensor * ig = ggml_mul_mat(gc, b.BL(il, "indexer_compressor_gate.weight"), xn);
+        ggml_tensor * kg = ggml_concat(gc, L.itail, ggml_concat(gc, ik, ig, 0), 1);         // [2ID, KP-1+n]
+        ggml_build_forward_expand(gf, ggml_cpy(gc, ggml_view_2d(gc, kg, 2 * ID, KP - 1, kg->nb[1], (size_t) n * kg->nb[1]),
+                                               L.itail));
+        ggml_tensor * rows = ggml_get_rows(gc, kg, ggml_view_1d(gc, im.i_newidx, KP * NW, 0));   // [2ID, KP*NW]
+        ggml_tensor * pk = ggml_cont(gc, ggml_view_2d(gc, rows, ID, KP * NW, rows->nb[1], 0));
+        ggml_tensor * pg = ggml_cont(gc, ggml_view_2d(gc, rows, ID, KP * NW, rows->nb[1], (size_t) ID * ggml_element_size(rows)));
+        ggml_tensor * ape = b.BL(il, "indexer_compressor_ape.weight");
+        if (ape->type != GGML_TYPE_F32) ape = ggml_cast(gc, ape, GGML_TYPE_F32);   // (the mini fixture's is F16)
+        ggml_tensor * lg = ggml_add(gc, ggml_reshape_3d(gc, pg, ID, KP, NW), ape);
+        lg = ggml_cont(gc, ggml_permute(gc, lg, 1, 0, 2, 3));                                   // [KP, ID, NW]
+        ggml_tensor * pr = ggml_reshape_3d(gc, ggml_soft_max(gc, ggml_reshape_2d(gc, lg, KP, ID * NW)), KP, ID, NW);
+        ggml_tensor * pkt = ggml_cont(gc, ggml_permute(gc, ggml_reshape_3d(gc, pk, ID, KP, NW), 1, 0, 2, 3));
+        ggml_tensor * pooled_new = ggml_reshape_2d(gc, ggml_sum_rows(gc, ggml_mul(gc, pr, pkt)), ID, NW);
+        ggml_tensor * ipool2 = ggml_set_rows(gc, L.ipool, pooled_new, ggml_view_1d(gc, im.i_newdst, NW, 0));
+        ggml_tensor * mask = nullptr;
+        if (!idx) {
+            ggml_build_forward_expand(gf, ipool2);
+            mask = ggml_reshape_2d(gc, ggml_view_1d(gc, im.i_mask, cap * n, 0), cap, n);
+        } else {
+            const int64_t npc = cap / KP, ntop = im.n_top_pools(cap), nsel = KP * ntop + KP - 1;
+            ggml_tensor * iq = ggml_reshape_3d(gc, ggml_mul_mat(gc, b.BL(il, "indexer.attn_q_b.weight"), qr), ID, im.IDXH, n);
+            ggml_tensor * wts = ggml_scale(gc, ggml_mul_mat(gc, b.BL(il, "indexer.proj.weight"), xn),
+                                           1.0f / std::sqrt((float) (ID * im.IDXH)));       // [IDXH, n]
+            ggml_tensor * pv = ggml_view_3d(gc, ipool2, ID, 1, npc, ipool2->nb[1], ipool2->nb[1], 0);
+            // pool p is visible to the token at t iff its last member KP*p+KP-1 <= t
+            ggml_tensor * pend = ggml_arange(gc, (float) (KP - 1), (float) (KP * npc), (float) KP);   // [npc]
+            ggml_tensor * tp = ggml_reshape_2d(gc, ggml_view_1d(gc, im.i_tpos, n, 0), 1, n);
+            ggml_tensor * vis = ggml_sub(gc, ggml_repeat_4d(gc, ggml_reshape_2d(gc, pend, npc, 1), npc, n, 1, 1), tp);
+            ggml_tensor * pmask = ggml_cast(gc, ggml_scale(gc, ggml_step(gc, vis), -65504.0f), GGML_TYPE_F16);
+            ggml_tensor * score = ggml_lightning_indexer(gc, iq, pv, wts, pmask);                  // [npc, n]
+            ggml_tensor * top = ggml_top_k(gc, score, (int) ntop);                                 // [ntop, n]
+            // live = the selected pool is visible (a token that sees fewer than ntop pools picks masked ones too);
+            // a dead slot writes its own dump row cap + slot, so every token's scatter indices stay unique
+            ggml_tensor * ss = ggml_get_rows(gc, ggml_reshape_3d(gc, score, 1, npc, n), top);    // [1, ntop, n]
+            ggml_tensor * live = ggml_step(gc, ggml_scale_bias(gc, ss, 1.0f, 30000.0f));
+            ggml_tensor * cells = ggml_scale(gc, ggml_reshape_3d(gc, ggml_cast(gc, top, GGML_TYPE_F32), 1, ntop, n), (float) KP);
+            cells = ggml_add(gc, ggml_repeat_4d(gc, cells, KP, ntop, n, 1),
+                             ggml_reshape_3d(gc, ggml_arange(gc, 0.0f, (float) KP, 1.0f), KP, 1, 1));
+            ggml_tensor * dump = ggml_reshape_3d(gc, ggml_arange(gc, (float) cap, (float) (cap + KP * ntop), 1.0f), KP, ntop, 1);
+            ggml_tensor * sel = ggml_add(gc, ggml_mul(gc, ggml_sub(gc, cells, dump), ggml_repeat_4d(gc, live, KP, ntop, n, 1)), dump);
+            sel = ggml_concat(gc, ggml_reshape_2d(gc, sel, KP * ntop, n),
+                              ggml_reshape_2d(gc, ggml_view_1d(gc, im.i_tail, (KP - 1) * n, 0), KP - 1, n), 0);   // [nsel, n]
+            sel = ggml_cast(gc, sel, GGML_TYPE_I32);
+            // rows padded to 8 halfs: CUDA flash_attn (head 512) needs every mask stride % 16 bytes == 0
+            ggml_tensor * mall = ggml_fill(gc, ggml_new_tensor_3d(gc, GGML_TYPE_F16, 1, cap + (nsel + 7) / 8 * 8, n), NEG_INF);
+            ggml_tensor * zeros = ggml_fill(gc, ggml_new_tensor_3d(gc, GGML_TYPE_F32, 1, nsel, n), 0.0f);
+            mall = ggml_set_rows(gc, mall, zeros, ggml_reshape_3d(gc, sel, nsel, n, 1));
+            mask = ggml_view_2d(gc, mall, cap, n, mall->nb[2], 0);
+            if (n > 1) mask = ggml_cont(gc, mask);   // flash_attn_ext wants a contiguous mask (rows are cap + nsel apart)
+        }
         ggml_tensor * out = ggml_flash_attn_ext(gc, q_abs, kview, kview, mask, 1.0f / std::sqrt((float) im.KM), 0.0f, 0.0f);
         ggml_flash_attn_ext_set_prec(out, GGML_PREC_F32);                              // [KVL, NH, n]
         out = ggml_cont(gc, ggml_permute(gc, out, 0, 2, 1, 3));                        // [KVL, n, NH]
@@ -552,6 +640,7 @@ static ggml_cgraph * build_attn(GlmDense::Impl & im, int il, int64_t cap, int64_
     GlmDense::Impl::Var v;
     v.cap = cap;
     v.n = n;
+    v.idx = idx;
     v.gf = gf;
     v.allo = im.allo_for(n);
     L.vars.push_back(v);
@@ -686,7 +775,11 @@ bool GlmDense::init(const std::string & model_path, const GlmDenseConfig & cfg, 
     im.NEXP = g.n_expert; im.NUSED = g.n_expert_used;
     im.NT = std::max(1, cfg.max_tokens);
     im.CAPMAX = std::max<int64_t>(im.cpu ? 16 : 256, next_pow2(std::max<int64_t>(1, cfg.ctx)));
-    if (!im.allow_long && im.CAPMAX > g.dense_attn_ctx()) im.CAPMAX = std::max<int64_t>(im.cpu ? 16 : 256, next_pow2(g.dense_attn_ctx()));
+    im.KP = g.idx_kpool; im.IDXD = g.idx_dim; im.IDXH = g.idx_heads;
+    im.PCAP = im.CAPMAX / im.KP;
+    im.NNEW = std::max<int64_t>(1, cfg.max_tokens) / im.KP + 1;
+    // the dense attention mask is only needed while the whole context fits the indexer's selection
+    im.MCAP = im.allow_long ? im.CAPMAX : std::min<int64_t>(im.CAPMAX, std::max<int64_t>(im.cpu ? 16 : 256, g.idx_top_k));
     if (im.NT > 4096) { err = "max_tokens > 4096"; return false; }
 
     // ---- persistent state
@@ -708,6 +801,8 @@ bool GlmDense::init(const std::string & model_path, const GlmDenseConfig & cfg, 
             L.S = ggml_new_tensor_3d(im.sctx, GGML_TYPE_F32, im.SK, im.SK, im.NH);
         } else {
             L.kvc = ggml_new_tensor_2d(im.sctx, GGML_TYPE_F16, im.KVL, im.CAPMAX);
+            L.ipool = ggml_new_tensor_2d(im.sctx, GGML_TYPE_F16, im.IDXD, im.PCAP + 1);
+            L.itail = ggml_new_tensor_2d(im.sctx, GGML_TYPE_F32, 2 * im.IDXD, im.KP - 1);
         }
         if (il == 0) {   // one set for all layers: layer l's attn -> experts -> finish completes before l+1 starts
             L.hap = ggml_new_tensor_3d(im.sctx, GGML_TYPE_F32, im.D, im.HC, NT);
@@ -771,8 +866,12 @@ bool GlmDense::init(const std::string & model_path, const GlmDenseConfig & cfg, 
     auto up = [&](size_t n) { return (n + al - 1) / al * al; };
     std::vector<ggml_tensor *> in_list;
     im.i_slot = ggml_new_tensor_1d(im.ictx, GGML_TYPE_I32, NT);
-    im.i_mask = ggml_new_tensor_1d(im.ictx, GGML_TYPE_F16, im.CAPMAX * NT);
-    in_list = { im.i_slot, im.i_mask };
+    im.i_mask = ggml_new_tensor_1d(im.ictx, GGML_TYPE_F16, im.MCAP * NT);
+    im.i_tpos = ggml_new_tensor_1d(im.ictx, GGML_TYPE_F32, NT);
+    im.i_newidx = ggml_new_tensor_1d(im.ictx, GGML_TYPE_I32, im.KP * im.NNEW);
+    im.i_newdst = ggml_new_tensor_1d(im.ictx, GGML_TYPE_I32, im.NNEW);
+    im.i_tail = ggml_new_tensor_1d(im.ictx, GGML_TYPE_F32, (im.KP - 1) * NT);
+    in_list = { im.i_slot, im.i_mask, im.i_tpos, im.i_newidx, im.i_newdst, im.i_tail };
     for (Impl::Layer & L : im.ly) { L.rbias = ggml_new_tensor_1d(im.ictx, GGML_TYPE_F32, im.NEXP); in_list.push_back(L.rbias); }
     size_t in_bytes = 0;
     for (ggml_tensor * t : in_list) in_bytes += up(ggml_nbytes(t));
@@ -891,26 +990,53 @@ bool GlmDense::attn_router_n(int il, int pos0, int n, int * routed_ids, float * 
         }
         if (pos_last >= im.CAPMAX) {
             im.err = pos_last >= im.g.dense_attn_ctx() && !im.allow_long
-                ? "context beyond " + std::to_string(im.g.dense_attn_ctx()) + " tokens needs the lightning indexer (phase 2)"
+                ? "context beyond the MLA cache (" + std::to_string(im.CAPMAX) + " rows; raise ctx)"
                 : "context beyond the MLA cache (" + std::to_string(im.CAPMAX) + " rows; raise ctx)";
             return false;
         }
     }
     const int64_t cap = L.kda ? 0 : im.cap_for(pos_last);
+    const bool idx = !L.kda && im.use_idx(pos_last);
     Impl::Var * var = nullptr;
-    for (Impl::Var & v : L.vars) if (v.cap == cap && v.n == n) { var = &v; break; }
-    if (!var) { build_attn(im, il, cap, n); var = &L.vars.back(); }
+    for (Impl::Var & v : L.vars) if (v.cap == cap && v.n == n && v.idx == idx) { var = &v; break; }
+    if (!var) { build_attn(im, il, cap, n, idx); var = &L.vars.back(); }
     if (!im.alloc(var->allo, var->gf)) { im.err = "gallocr(attn) failed"; return false; }
 
     // inputs: one upload per pass (positions or capacity changed, or a route bias was set)
     const int64_t mcap = im.cap_for(pos_last);
     if (im.in_dirty || pos0 != im.in_pos || n != im.in_n || mcap != im.in_cap) {
-        int32_t * slot = (int32_t *) (im.in_host.data() + ((uint8_t *) im.i_slot->data - im.in_base));
-        ggml_fp16_t * mask = (ggml_fp16_t *) (im.in_host.data() + ((uint8_t *) im.i_mask->data - im.in_base));
+        auto in_ptr = [&](ggml_tensor * t) { return im.in_host.data() + ((uint8_t *) t->data - im.in_base); };
+        int32_t * slot = (int32_t *) in_ptr(im.i_slot);
+        ggml_fp16_t * mask = (ggml_fp16_t *) in_ptr(im.i_mask);
+        float * tpos = (float *) in_ptr(im.i_tpos);
+        int32_t * nidx = (int32_t *) in_ptr(im.i_newidx);
+        int32_t * ndst = (int32_t *) in_ptr(im.i_newdst);
+        float * tail = (float *) in_ptr(im.i_tail);
         const ggml_fp16_t z = ggml_fp32_to_fp16(0.0f), ninf = ggml_fp32_to_fp16(NEG_INF);
+        const bool dense = !im.use_idx(pos_last);
+        const int64_t KP = im.KP, ntop = im.n_top_pools(mcap);
         for (int t = 0; t < n; ++t) {
-            slot[t] = pos0 + t;
-            for (int64_t j = 0; j < mcap; ++j) mask[(size_t) t * mcap + j] = j <= pos0 + t ? z : ninf;
+            const int64_t pos = pos0 + t;
+            slot[t] = (int32_t) pos;
+            tpos[t] = (float) pos;
+            if (dense && mcap <= im.MCAP)
+                for (int64_t j = 0; j < mcap; ++j) mask[(size_t) t * mcap + j] = j <= pos ? z : ninf;
+            // the incomplete pool (kpool_select_tail): positions pos, pos-1, ... of it; dead slots -> own dump row
+            const int64_t n_tail = (pos + 1) % KP;
+            for (int64_t k = 0; k < KP - 1; ++k)
+                tail[(size_t) t * (KP - 1) + k] = k < n_tail ? (float) (pos - k) : (float) (mcap + KP * ntop + k);
+        }
+        // pools completed by this pass: members index [tail (KP-1 earlier tokens) | this pass]
+        int64_t q = 0;
+        for (int64_t pp = pos0 / KP; pp <= (pos_last) / KP; ++pp) {
+            const int64_t end = KP * pp + KP - 1;
+            if (end < pos0 || end > pos_last) continue;
+            for (int64_t k = 0; k < KP; ++k) nidx[q * KP + k] = (int32_t) (KP * pp + k - pos0 + (KP - 1));
+            ndst[q++] = (int32_t) pp;
+        }
+        for (; q < im.NNEW; ++q) {   // padding: any members, written to the dump row
+            for (int64_t k = 0; k < KP; ++k) nidx[q * KP + k] = 0;
+            ndst[q] = (int32_t) im.PCAP;
         }
         ggml_backend_tensor_set(im.i_span, im.in_host.data(), 0, im.in_host.size());
         im.in_pos = pos0; im.in_n = n; im.in_cap = mcap; im.in_dirty = false;

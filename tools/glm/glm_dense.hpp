@@ -38,7 +38,8 @@ struct GlmGeometry {
     int64_t kda_head_dim = 128, d_conv = 4;
     double  kda_gate_lower_bound = -5.0;
     int64_t q_lora = 1536, kv_lora = 512, k_mla = 256, v_mla = 256;
-    int64_t idx_top_k = 2048, idx_kpool = 4;
+    int64_t idx_top_k = 2048, idx_kpool = 4, idx_heads = 32, idx_dim = 128;
+    double  ln_eps = 1e-6;              ///< attention.layer_norm_epsilon (the indexer key LayerNorm)
     int64_t n_expert = 288, n_expert_used = 8, n_ff_exp = 2048, n_dense_lead = 3;
     double  expert_weights_scale = 2.5;
     bool    expert_weights_norm = true;
@@ -59,7 +60,7 @@ struct GlmDenseConfig {
     int     max_tokens = 4;             ///< tokens one pass may carry (decode 1; prompt chunks up to this, <= 4096)
     bool    skip_routed_experts = true; ///< the tier owns ffn_*_exps (never upload them)
     bool    gate_taps = false;          ///< keep host copies of l_out per layer (tap_l_out) for the gates
-    bool    allow_long_ctx = false;     ///< past dense_attn_ctx() without the indexer (NOT the model's math)
+    bool    allow_long_ctx = false;     ///< dense MLA at any length (NOT the model's math past dense_attn_ctx())
     /// Run-time rank-1 adapter (tools/glm/glm_lora.hpp), or NULL.  The dense half applies the adapter's whole-module
     /// targets (`attn_output`, `ffn_down_shexp`) in the graph as y += B (A x); the routed experts' adapter entries
     /// are Ds4MoeTier's (set separately on the tier).  The adapter must outlive the GlmDense.
