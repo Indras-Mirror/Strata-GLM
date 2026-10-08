@@ -17,28 +17,49 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
 `docs/glm/FINDINGS.md`; then the DS4 docs we build on: `docs/ds4/RESUME_PROMPT.md` (rules, gates, lessons),
 `docs/ds4/ENGINE_DENSE.md`, `docs/ds4/ENGINE_MOE.md`; `git log --oneline -15`.
 
-## State (2026-10-08)
-- No GLM code yet. Branch `glm` = DS4 engine (Ds4Dense + Ds4MoeTier, mHC, MLA, clamped SwiGLU, CUDA graphs,
-  chunked MMQ prefill incl. Q2_K/Q3_K, VRAM LRU, split direct reads) - all reusable.
-- Model download STARTED 2026-10-08 ~18:01 to `/media/mal/NVME1TB/Models/GLM-5.3-Flash-RCO/` (exFAT; Mal chose it).
-  Check: `tail -3 /media/mal/NVME1TB/Models/GLM-5.3-Flash-RCO/download.log` and the file
-  `GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf` (complete = 113,59x,xxx,xxx bytes and "sha256 ok" in the log). If it
-  died, re-run `FORCE_EXFAT=1 bash ~/AI/download_glm53_flash.sh /media/mal/NVME1TB/Models/GLM-5.3-Flash-RCO`
-  (resumes). First 10 min ran 8-15 MiB/s while another download shared the link.
-- MTP head (`neuralll/GLM-5.3-Flash-MTP-GGUF`, 4.6 GB) is queued to download into `.../GLM-5.3-Flash-RCO/mtp/`
-  right after the main model (log `mtp-download.log`); if missing, run that `hf download` by hand. MTP is a planned
-  speed lever (ARCHITECTURE.md "MTP"), not optional.
-- Abliteration LoRAs downloaded to `.../GLM-5.3-Flash-RCO/lora/` (PLAN.md lists them; default = GCSA Abliterix v2).
+## State (2026-10-08 evening) - READ THIS
+- **Code written, NOT compiled or run yet** (commit after `82bf0f2`):
+  - `tools/glm/glm_dense.{hpp,cpp}` - GlmDense, phase 1: mHC (fused ggml_dsv4_hc_* ops), KDA via
+    `ggml_gated_delta_net` (KDA path, K=1) + causal conv state, nope-MLA over an F16 latent cache with flash-attn
+    (no indexer: exact up to 2051 tokens, refuses beyond unless allow_long_ctx), dense FFN layers 0-2 and shared
+    expert with `ggml_swiglu_clamp` (limit = swiglu_clamp_shexp, 10), sigmoid router + exp_probs_b selection bias +
+    norm + x2.5, head = mean of 4 streams -> output_norm -> output.  One input upload per pass (slot + causal mask +
+    route bias), one readback per layer ([fn|ids|wts] block).  Graph per (layer, n, MLA cap); per-graph allocators
+    with uid reuse.  KDA state cannot rewind: positions must arrive in order (no verify/MTP rollback yet).
+  - `tools/glm/glm_generate.cpp` - driver (GlmDense + Ds4MoeTier, decode-loop prefill, --ppl, --route-bias,
+    --vram-lru, --dump-routes FILE writes a GLM routing profile in seed_from_routes(file, 512) format; without
+    --profile the arena/VRAM cache are seeded in (layer, expert) index order).
+  - `tools/glm/cmake/glm.cmake` (included from root CMakeLists after ds4_engine.cmake): `glm_generate` (CUDA tree,
+    needs ds4_moe_cuda) / `glm_generate_cpu` (CPU tree).
+  - `third_party/llama.cpp` copied from Strata-DS4 (untracked, gitignored; 175 MB): the ggml with every GLM op.
+- Verified while writing (no build yet): ggml ops gated_delta_net (scales q by 1/sqrt(S) itself; identical to
+  the fork's), swiglu_clamp semantics == Ds4MoeTier's CPU clamp (gate min lim, up clamp +-lim), fork's MoE routing
+  order, GGUF tensor shapes (ARCHITECTURE.md; header dump in
+  /tmp/claude-1000/.../scratchpad/glm_hdr.json is gone after reboot - re-read with the range-read trick if needed).
+  Expert types: layers 3-5 Q4_K, 6-8 Q3_K, 9-44 Q2_K; the tier handles per-layer types + dense layers already.
+- Model download: `/media/mal/NVME1TB/Models/GLM-5.3-Flash-RCO/` (~26/106 GiB at 18:40, ~30-50 MiB/s; resumable:
+  `FORCE_EXFAT=1 bash ~/AI/download_glm53_flash.sh /media/mal/NVME1TB/Models/GLM-5.3-Flash-RCO`). A background job
+  then downloads the MTP head into `mtp/` (if that session died, run
+  `hf download neuralll/GLM-5.3-Flash-MTP-GGUF --local-dir .../GLM-5.3-Flash-RCO/mtp` by hand). LoRAs in `lora/`.
+- Reference fork source cloned at `~/AI/llama.cpp-glm53` (neurall/llama.cpp 2e0435a, NOT built yet).
+- Relay: this session was `strata-glm`; asked `strata-ds4` (ask_id e85816a6) for a CPU gap to compile - no reply
+  yet; DS4 was running ds4_generate benchmarks (GPU 74%, 23.7 GB) - compiles skew their timings, so ask first.
 
 ## Next (in order)
-1. **Reference oracle** (CPU only, can start before the model lands): clone + build `neurall/llama.cpp` into
-   `~/AI/llama.cpp-glm53` (CUDA, sm_89). Don't build while another session is benchmarking (ask on the relay).
-   The fork is already cloned there (source read in full - ARCHITECTURE.md); only the build is left.
-   Point STRATA's ggml at a copy of DS4's `third_party/llama.cpp` (it has every op GLM needs).
-2. Answer ARCHITECTURE.md "Open questions", then the mini glm5-next fixture + `GlmDense` phase 1 (dense MLA).
-3. When the model is complete: baseline the fork on this box (decode/prompt tok/s, ppl wikitext-2 40x512, through
-   memguard + GPU lock), golden dumps for the gates.
-4. Then PLAN.md "Port order" steps 2-7.
+1. Configure + build (after DS4 says OK or is idle): CPU tree first for compile errors, e.g.
+   `cmake -B build-glm -DSTRATA_GGML_DIR=$PWD/third_party/llama.cpp -DCMAKE_BUILD_TYPE=Release` (copy the other
+   options from `~/AI/Strata-DS4/build-ds4/CMakeCache.txt`), `nice -n 10 ninja -C build-glm glm_generate_cpu`; then the
+   CUDA tree like `~/AI/Strata-DS4/build-ds4-gpu` (GGML_CUDA=ON, STRATA_GGML_CUDA=ON, CUDA arch 89,
+   STRATA_MMQ_KQUANTS=ON) -> `glm_generate`.
+2. Build the fork (`~/AI/llama.cpp-glm53`, CUDA sm_89, `nice -n 19 -j4`) = the oracle; tokenizer via its
+   `llama-tokenize`, or the upstream tokenizer.json in bench/glm-2026-10-08/upstream/ (chat_template.jinja there too).
+3. Mini fixture `tools/glm/make_mini_glm.py` (glm5-next keys as in the real header: block_count, head_count_kv
+   per-layer array, kda.*, ssm.conv_kernel, attention.*_mla, indexer.*, hyper_connection.*, swiglu_clamp_* arrays,
+   expert_gating_func 2; tensor shapes in ARCHITECTURE.md) -> compare glm_generate_cpu logits vs the fork's
+   llama-cli/eval-callback on it (CPU, no GPU needed).
+4. Real model when downloaded (memguard 84 70, GPU lock, ask strata-ds4): short prompt, compare first-token logits vs
+   the fork; then --dump-routes on a few prompts -> profile -> --profile + --vram-lru tok/s; quality harness port.
+5. Then ARCHITECTURE.md "Decisions" 5-7 (LoRA, speed, Strata-fied MTP, indexer).
 
 ## Rules (non-negotiable; same as DS4)
 - **Every full-model load through `tools/ds4/memguard.sh <cap> <need> -- <cmd>`** (cgroup RAM cap, swap off, shared

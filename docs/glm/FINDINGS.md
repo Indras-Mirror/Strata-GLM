@@ -24,3 +24,16 @@ applied at run time (GCSA Abliterix v2 by default); details in PLAN.md.
 with bias) and adds KDA linear attention in 34 of 45 layers, a relative of Strata's Qwen-Next gated delta net.
 
 NOT measured yet: anything on the real model.
+
+## s2 (2026-10-08): reference read, ops verified, phase-1 code written (not built)
+- neurall/llama.cpp glm5-next.cpp read in full; its graph is the spec (ARCHITECTURE.md). mHC identical to DS V4
+  (same fused ops); head = plain mean of the 4 streams (no hc_head). Dense FFN layers 0-2 ALSO use the SwiGLU clamp
+  (swiglu_clamp_shexp[il] = 10 on every layer).
+- Strata's ggml (DS4's third_party/llama.cpp) already has gated_delta_net (KDA), lightning_indexer, ssm_conv,
+  dsv4_hc_*, swiglu_clamp: no new kernels for phase 1.
+- The expert tier needs no changes (per-layer Q4_K/Q3_K/Q2_K + non-routed dense layers work since MiMo).
+- Online (2026-10-08): no GLM-5.3-Flash-specific kernel projects worth reusing - neurall's fork (expert cache from
+  llama.cpp PR #27861, MTP-only GGUF loading), LayerStoRm (expert streaming, multi-GPU SM120, PCIe-bound, 24.5 tok/s on
+  2x5090+2x5080), DGPP (GB10-only engine). The KDA/MLA kernels everyone uses are llama.cpp's.
+- MTP head GGUF (neuralll, 4.6 GB): depth-1 acceptance 70-75% but slower in the stock fork with 30% CPU experts; ours
+  is planned Strata-fied (ARCHITECTURE.md). NOT measured here.
