@@ -5,7 +5,7 @@ Reads one or more saliency files written by `glm_generate --prefill-chunk N --sa
 i32 n_expert, f64 sum[L*E] of routing-weight * ||expert output||_2, i64 count[L*E]) and writes "layer expert" lines
 for the experts to mask out of routing.
 
-REAP score (Lasby et al. 2025, "REAP: Router-weighted Expert Activation Pruning"): S_j = mean over the tokens routed
+REAP score (Router-weighted Expert Activation Pruning, Cerebras 2025): S_j = mean over the tokens routed
 to j of g_j(x) * ||f_j(x)||.  An expert never routed on the calibration text scores 0 and goes first.
 
 Budget: --frac F prunes the F lowest-scoring experts in every routed layer, or --fit-gb B picks the smallest uniform
