@@ -395,6 +395,13 @@ int main(int argc, char ** argv) {
                 if (!dense.logits_rows(n - 1, 1, first_logits.data())) { std::fprintf(stderr, "glm_generate: %s\n", dense.last_error().c_str()); return 1; }
             }
             pc_head += now_ms() - th;
+            {   // progress, llama.cpp-style: tokens done, rate so far, ETA
+                const double el = (now_ms() - t_pf0) / 1000.0, done = (double) (c0 + (size_t) n);
+                const double rate = done / std::max(el, 1e-9);
+                std::fprintf(stderr, "\rprefill %zu/%zu tokens | %.1f tok/s | %.0f s elapsed, ETA %.0f s   ",
+                             c0 + (size_t) n, prompt.size(), rate, el, ((double) prompt.size() - done) / std::max(rate, 1e-9));
+                if (c0 + (size_t) n == prompt.size()) std::fprintf(stderr, "\n");
+            }
         }
         if (!a.saliency.empty()) {   // [i32 n_layer][i32 n_expert][f64 sum x L*E][i64 count x L*E]
             const std::vector<double> & ss = tier.saliency_sum();
@@ -449,6 +456,9 @@ int main(int argc, char ** argv) {
         std::fflush(stdout);
         if (std::find(a.stop.begin(), a.stop.end(), tok) != a.stop.end()) { ++n_gen; break; }
         if (n_gen + 1 == a.n_predict) { ++n_gen; break; }
+        if (n_gen > 0 && n_gen % 8 == 0)
+            std::fprintf(stderr, "\rdecode %d/%d tokens | %.2f tok/s   ", n_gen, a.n_predict,
+                         1000.0 * n_gen / std::max(now_ms() - t_dec0, 1e-9));
         if (!step(tok, pos++)) {
             std::fprintf(stderr, "glm_generate: decode failed at pos %d: %s\n", pos - 1, dense.last_error().c_str());
             return 1;
