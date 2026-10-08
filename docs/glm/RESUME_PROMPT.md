@@ -25,6 +25,9 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
   `GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf` (complete = 113,59x,xxx,xxx bytes and "sha256 ok" in the log). If it
   died, re-run `FORCE_EXFAT=1 bash ~/AI/download_glm53_flash.sh /media/mal/NVME1TB/Models/GLM-5.3-Flash-RCO`
   (resumes). First 10 min ran 8-15 MiB/s while another download shared the link.
+- MTP head (`neuralll/GLM-5.3-Flash-MTP-GGUF`, 4.6 GB) is queued to download into `.../GLM-5.3-Flash-RCO/mtp/`
+  right after the main model (log `mtp-download.log`); if missing, run that `hf download` by hand. MTP is a planned
+  speed lever (ARCHITECTURE.md "MTP"), not optional.
 - Abliteration LoRAs downloaded to `.../GLM-5.3-Flash-RCO/lora/` (PLAN.md lists them; default = GCSA Abliterix v2).
 
 ## Next (in order)

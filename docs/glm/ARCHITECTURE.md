@@ -75,12 +75,20 @@ Per token, d_inner = 64 heads x 128 = 8192:
 - Expert blobs: 288 x 42 = 12,096 experts, gate/up/down 4096<->2048. Q2_K in 36 layers, Q3_K in 3, Q4_K in 3 (by the
   types file; RCO chose them). ~8.3 MB per Q2_K expert, ~100 GB in all *estimate* (exact from the GGUF once it lands).
 
-### MTP
-Config has 1 NextN layer (a DSA layer + MoE). Our GGUF has none; `neuralll/GLM-5.3-Flash-MTP-GGUF` (4.6 GB, Q4_K,
-`-md` in the fork) is the block alone. neuralll measured **depth-1 acceptance 70-75% but MTP SLOWER** (20.2 -> 17.6-18.4
-t/s) on 2x3090 with 30% of expert work on the CPU. That matches our speculation economics (MiMo s16: one draft
-needs ~71% acceptance just to break even when expert misses dominate). **Skip MTP/DFlash2 until the single-pass is
-fast**; revisit only if most experts end up VRAM/RAM-resident.
+### MTP (planned - Mal 2026-10-08: "MTP is where half the decode improvements come from")
+Config has 1 NextN layer (a DSA layer + MoE). Our GGUF has none; `neuralll/GLM-5.3-Flash-MTP-GGUF` (4.6 GB, Q4_K
+from unsloth UD-Q4_K_XL, `-md` in the fork) is the block alone - **queued to download right after the main model**
+into `.../GLM-5.3-Flash-RCO/mtp/` (log `mtp-download.log`). neuralll measured **depth-1 acceptance 70-75%** but MTP
+**slower** in the stock fork (20.2 -> 17.6-18.4 t/s, 2x3090): the draft's 4.6 GB took VRAM from the expert cache and
+~30% of expert work stayed on the CPU, where a drafted token costs as much as a generated one.
+**Strata-fied MTP, the plan:** the MTP block's dense part (DSA attention, eh_proj, norms, shared expert, router;
+small) resident in VRAM; its 288 routed experts go through the tier like the trunk's (hot ones in VRAM slots,
+the rest in the RAM arena: DS4's `--mtp-resident`), not a 4.6 GB static VRAM block. The verify pass (2 tokens)
+reads each expert once for both tokens when they share it (MiMo s16: a 2-token pass reads ~1.8x one token's misses,
+not 2x) and the higher GLM hit rate (~86% of experts in VRAM/RAM) shrinks the miss cost that killed it in the fork.
+Gate the economics with the s16 formula once the single-pass numbers exist: speedup ~ (1 + acceptance) /
+(verify cost + draft cost) in single-pass units. DS4 reached 63% acceptance with its own head; GLM's 70-75% is
+better. **Order: after the single pass works and has CUDA graphs + VRAM LRU** (step 6 of the port).
 
 ## Memory plan (4090 24 GB, 90 GB RAM) *estimate*
 | what | where | size |
@@ -121,7 +129,8 @@ once the cache is seeded.
    (`ggml_mul_mat` with A then B). Check the fork's LoRA results for the gate (KDA `o_proj` LoRA needs the
    heretic-gguf one-line patch in the fork).
 6. **Speed later, in this order:** CUDA graphs + single readback per layer (DS4 lessons), `--vram-lru`, chunked
-   MMQ prefill (Q2_K/Q3_K/Q4_K already supported), route-bias, then indexer for long context. MTP/DFlash2 last.
+   MMQ prefill (Q2_K/Q3_K/Q4_K already supported), route-bias, **then MTP (Strata-fied, above)**, then the indexer
+   for long context. DFlash2 (0.4-2.4 GB GGUF drafters exist) after MTP.
 7. Alternative if decode disappoints: `patrickbdevaney/GLM-5.3-Flash-REAP50-GGUF` (50% of experts pruned, Q3_K_M
    78.8 GB - would sit entirely in RAM+VRAM) - quality cost unmeasured; OpenMOSE's REAP-250B (~25% pruned) publishes
    KL/top-1 tables. Not now: Mal picked GLM for quality.
