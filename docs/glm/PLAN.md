@@ -11,13 +11,16 @@ the real model yet. Re-check every architectural claim against the reference imp
 |---|---|
 | `GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf` | 113.6 GB (105.8 GiB), `neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF`, sha256 `5f03b74f...138f9d6d`. Experts = pfeifferj GSQ-RCO 3.0-bit; non-expert Q8_0 -> Q4_K (+0.95% ppl, 7-16% faster decode in their fork). |
 | `tensor-types-q4kattn.txt` | every tensor name and its type (the inventory below comes from it) |
-| `lora/gcsa-abliterix/GLM-5.3-Flash-Ablitered2-LoRA-v2.gguf` | **default uncensor adapter.** Rank-1 F16 LoRA (Abliterix SRA): routed-expert `down_proj` layers 3-28 (all 288 experts), shared-expert `down_proj` 18-44, attn `o_proj` 15-44. StrongREJECT refusal 1.67%, lower KL than v1. |
+| `lora/gcsa-abliterix/GLM-5.3-Flash-Ablitered2-LoRA-v2.gguf` | **default uncensor adapter.** Rank-1 F16 LoRA (Abliterix SRA), 135 A/B pairs, `adapter.type=lora`, `adapter.lora.alpha=1.0`, `general.architecture=glm5next`. Targets (verified from the GGUF): routed-expert `ffn_gate_exps` **and** `ffn_up_exps` **and** `ffn_down_exps` layers 3-28 (all 288 experts; A/B are 3-D `[in,1,288]`/`[1,out,288]`), shared-expert `ffn_down_shexp` 18-44, attn `attn_output` 15-44. StrongREJECT refusal 1.67%. **Runtime LoRA is NOT implemented in the engine yet** (Decision 5). |
 | `lora/gcsa-abliterix/GLM-5.3-Flash-Ablitered-LoRA-v1.gguf` | v1: same modules, routed experts in layers 18-44. Refusal 3.33% (StrongREJECT), 1% (SimpleSafety). |
 | `lora/heretic/glm-5.3-heretic-lora.gguf` | MorinoNushi heretic-gguf trial 8 (28 MB): refusal 95% -> 26%, KL 0.068. Weaker, early. |
 | `download.log` | the download's log (exFAT volume, `FORCE_EXFAT=1` by Mal's choice) |
 
-Download: `FORCE_EXFAT=1 bash ~/AI/download_glm53_flash.sh /media/mal/NVME1TB/Models/GLM-5.3-Flash-RCO`
-(resumable; re-run the same command after an interruption; sha256 check at the end).
+Download: `bash ~/AI/glm_fetch_all.sh` (resumable: `curl -C -` appends to `<dir>/<file>.part`, then it checks sha256,
+renames to the final name and fetches the MTP head into `mtp/`; re-run any time to continue). Run it detached:
+`setsid nohup bash ~/AI/glm_fetch_all.sh >/dev/null 2>&1 &`. The older
+`FORCE_EXFAT=1 bash ~/AI/download_glm53_flash.sh <dir>` is stale - its free-space check miscounts an existing
+`.part` and it restarts the file from zero, so do NOT use it on a partial download.
 
 No uncensored GSQ-RCO quant fits (GCSA-AiLab's is 137 GB), hence the runtime LoRA.
 
@@ -73,9 +76,12 @@ wikitext-2 ppl 3.5871 (40 x 512). Build it into `~/AI/llama.cpp-glm53` (not insi
    oracle's hidden states on a mini fixture (`make_mini_gguf.py` style), then the real model.
 4. Experts: `Ds4MoeTier` as is (Q2_K/Q3_K/Q4_K; MMQ prompt chunks; `--vram-lru`; split reads) + a routing profile
    (`route_probe`) for the seed.
-5. Runtime rank-1 LoRA: for an expert's `down_proj`, `y += B (A . h)` - one 2048-dot + one 4096-axpy per active
-   expert, applied after the expert kernel (CPU and GPU paths) so the quantized blobs are untouched; same for shared
-   down and `attn_output`. Gate: logits with the LoRA vs llama.cpp `--lora` on the fork.
+5. Runtime rank-1 LoRA (NOT implemented). The default adapter touches routed-expert `ffn_gate_exps` / `ffn_up_exps` /
+   `ffn_down_exps` (layers 3-28), shared `ffn_down_shexp` (18-44) and `attn_output` (15-44). For `down_exps` /
+   `down_shexp` / `attn_output` a rank-1 delta is `y += B (A . h)` (a dot + an axpy after the matmul, quantized blobs
+   untouched). For `gate_exps` / `up_exps` the delta lands *before* the SwiGLU, so it must be injected into the grouped
+   expert kernel (and the CPU expert loop), not applied as a post-add. Gate: logits/ppl with the LoRA vs llama.cpp
+   `--lora` on the fork (note the fork's KDA `o_proj` LoRA needs the heretic-gguf one-line patch to apply at all).
 6. Speed work from DS4/MiMo: CUDA graphs, chunked MMQ prefill, VRAM LRU, route-bias, then MTP if an MTP head GGUF
    shows up.
 7. Quality: `tools/mimo/quality/run_quality.py` pattern (7 agentic/coding tasks) with GLM's chat template.

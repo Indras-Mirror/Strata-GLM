@@ -221,6 +221,9 @@ struct Ds4MoeConfig {
     /// Prompt chunks: while layer l's experts compute (and the caller runs layer l+1's dense half), DMA layer l+1's
     /// arena experts into the other device half, which is then sized to a whole layer.  Off with arena_adapt.
     bool chunk_prestage = false;
+    /// REAP saliency (calibration only): every prompt chunk reads its experts' outputs back and accumulates, per
+    /// (layer, expert), sum of routing weight x ||expert output||_2 and the token count (saliency_sum / saliency_count).
+    bool saliency = false;
     /// Decode (run): a routed expert that is a VRAM miss and weighs less than `skip_miss` x the token's weight sum is
     /// dropped (not fetched, contributes 0).  Hits are never dropped.  0 = off.  A quality trade: measure ppl.
     float skip_miss = 0.0f;
@@ -321,6 +324,7 @@ public:
     int64_t arena_experts() const;     ///< blobs the host arena holds
     int64_t file_tier() const;         ///< blobs the arena could not take
     double arena_gib() const;
+    int64_t blob_bytes(int64_t layer) const;   ///< one expert's gate+up+down bytes in `layer` (0 if not routed)
     /// Whether `expert` of `layer` is resident in a VRAM slot right now (false in CPU-only mode).
     bool resident(int64_t layer, int64_t expert) const;
     /// Whether `expert` of `layer` is in the host arena (false in CPU-only mode and for the file tier).
@@ -341,6 +345,9 @@ public:
     bool build_arena_from_routes(const std::string& routes_bin, int batch_tokens, std::string& err);
     /// Frees run_chunk's device and pinned buffers (the next run_chunk allocates them again).
     void release_chunk();
+    /// REAP accumulators (Ds4MoeConfig::saliency), [layer * n_experts + expert]; empty when off.
+    const std::vector<double>& saliency_sum() const;
+    const std::vector<int64_t>& saliency_count() const;
     cpu::ExpertPool& pool();           ///< the CPU tier's worker pool (the gate's single-expert check uses it)
 
 private:

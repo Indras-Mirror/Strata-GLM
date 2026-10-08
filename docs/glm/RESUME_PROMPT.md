@@ -17,8 +17,30 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
 `docs/glm/FINDINGS.md`; then the DS4 docs we build on: `docs/ds4/RESUME_PROMPT.md` (rules, gates, lessons),
 `docs/ds4/ENGINE_DENSE.md`, `docs/ds4/ENGINE_MOE.md`; `git log --oneline -15`.
 
-## State (2026-10-08 evening) - READ THIS
-- **Code written, NOT compiled or run yet** (commit after `82bf0f2`):
+## State (2026-10-08 night) - **CURRENT, read this first**
+- **LATE UPDATE (FINDINGS s6)**: `--lora` is wired for the DENSE half and **verified active** (adapter changes
+  generation; `logits[0]` max|d| 2.14); the routed-expert LoRA is still NOT wired (not abliterated). A real-prompt
+  warm-cache A/B measured **cold 1.75 -> warm 1.88 tok/s decode (+7% only)** - the arena caps at ~55% of the 12096
+  (layer,expert) pairs, so the profile barely helps, and file reads stayed 472 ms/pass. Speed levers, measured:
+  bigger arena (~72 GiB holds every expert), higher `--pcie`, lower `--pf-b`, and chunked MMQ prefill (prefill is
+  still the 1-token loop at ~1.9 tok/s). Prompts + run scripts live in `bench/glm-2026-10-08/`.
+- **The model is downloaded + verified**: `/media/mal/NVME1TB/Models/GLM-5.3-Flash-RCO/GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf`
+  (113585695168 B, sha256 `5f03b74f...38d9f6d`, verified + renamed by the fetcher) and the MTP head
+  `mtp/GLM-5.3-Flash-MTP-Q4_K.gguf` (4.6 GB). `bash ~/AI/glm_fetch_all.sh` is the resumable fetcher (now done).
+- **FIRST real-model run DONE** (`glm_generate`, CUDA, memguard 84 70, `--slots auto --arena-gib 60 --vram-lru --ctx 2048
+  -n 16`): 45 layers (34 KDA, 11 MLA), dense half on CUDA in 1.4 s, 1269 VRAM slots, arena 60 GiB = 6917 experts + file
+  tier 5179, tier load 55.9 s. Decode **1.75 tok/s COLD** (expert hit 18.6%, file reads 460 ms/pass) = **no routing
+  profile yet**. Details in FINDINGS s4.
+- **Blocker fixed and BUILT**: `STRATA_D_FMTS` (src/kernels/cuda/iq_kernels.cu) was missing Q4_K (12), so GLM's Q4_K
+  expert layers 3-5 were refused at tier init. Added `X(12)`; `build-glm-gpu` rebuilt; the run succeeded.
+- **Abliteration LoRA: loader DONE + verified, NOT wired** (`tools/glm/glm_lora.hpp`, FINDINGS s5). Remaining: a
+  `--lora <adapter.gguf>` flag, apply `solo()` deltas in the `GlmDense` graph (`attn_output`, `ffn_down_shexp`) and
+  `exps()` deltas in `Ds4MoeTier` (gate/up BEFORE the SwiGLU, down after) in both CPU and CUDA paths.
+- Both trees build clean: `build-glm` (CPU), `build-glm-gpu` (CUDA). **No builds while the `strata-ds4` session runs.**
+
+## State (2026-10-08 evening) - superseded by the night block above
+- **Code written; the CPU tree builds clean and the mini fixture runs end to end - NOT run on the real model yet**
+  (commits `e889e75` + this session):
   - `tools/glm/glm_dense.{hpp,cpp}` - GlmDense, phase 1: mHC (fused ggml_dsv4_hc_* ops), KDA via
     `ggml_gated_delta_net` (KDA path, K=1) + causal conv state, nope-MLA over an F16 latent cache with flash-attn
     (no indexer: exact up to 2051 tokens, refuses beyond unless allow_long_ctx), dense FFN layers 0-2 and shared
@@ -37,29 +59,54 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
   order, GGUF tensor shapes (ARCHITECTURE.md; header dump in
   /tmp/claude-1000/.../scratchpad/glm_hdr.json is gone after reboot - re-read with the range-read trick if needed).
   Expert types: layers 3-5 Q4_K, 6-8 Q3_K, 9-44 Q2_K; the tier handles per-layer types + dense layers already.
-- Model download: `/media/mal/NVME1TB/Models/GLM-5.3-Flash-RCO/` (~26/106 GiB at 18:40, ~30-50 MiB/s; resumable:
-  `FORCE_EXFAT=1 bash ~/AI/download_glm53_flash.sh /media/mal/NVME1TB/Models/GLM-5.3-Flash-RCO`). A background job
-  then downloads the MTP head into `mtp/` (if that session died, run
-  `hf download neuralll/GLM-5.3-Flash-MTP-GGUF --local-dir .../GLM-5.3-Flash-RCO/mtp` by hand). LoRAs in `lora/`.
-- Reference fork source cloned at `~/AI/llama.cpp-glm53` (neurall/llama.cpp 2e0435a, NOT built yet).
-- Relay: this session was `strata-glm`; asked `strata-ds4` (ask_id e85816a6) for a CPU gap to compile - no reply
-  yet; DS4 was running ds4_generate benchmarks (GPU 74%, 23.7 GB) - compiles skew their timings, so ask first.
+- **Build (2026-10-08 evening):** `build-glm` (CPU) builds clean on the first try and `glm_generate_cpu` runs the new
+  `tools/glm/make_mini_glm.py` fixture end to end (4 layers, finite logits, exit 0) - no GPU, no real model.
+  `build-glm-gpu` (CUDA, arch 89, MMQ_KQUANTS) was building as this was written -> `glm_generate`.
+- Model download: `/media/mal/NVME1TB/Models/GLM-5.3-Flash-RCO/` (~34/105.8 GiB at 18:5x, ~12 MiB/s; resumable:
+  `bash ~/AI/glm_fetch_all.sh` - curl `-C -` appends to `$D/GLM-...q4kattn.gguf.part`, then sha256 + rename + the MTP
+  head into `mtp/`; launch detached with `setsid nohup`). The old `download_glm53_flash.sh` `FORCE_EXFAT` command is
+  stale (restarts a partial from zero) - do NOT use it. LoRAs in `lora/`.
+- Reference fork at `~/AI/llama.cpp-glm53` (neurall/llama.cpp 2e0435a). A **CPU-only** build now exists there (`build/`:
+  `llama-cli`, `llama-perplexity`, `llama-tokenize`). The CUDA fork build (for the real-model tok/s baseline) is still
+  TODO - do it only with DS4 idle. Fixture oracle is pending: the fork accepts the fixture's tokenizer now, but its
+  DSA/k-pool graph asserts (`ggml_set_rows` in `glm5-next.cpp`) on the tiny dims - the fixture's `attention.indexer.*` /
+  MLA dims must match the fork before it can serve as a gate. Likely primary gate instead: real-model `llama-perplexity`
+  vs our `--ppl` on the same ids.
+- Relay: the `strata-glm` session's DS4 ask (`e85816a6`) was still open; the 2026-10-08 evening session had no relay
+  tools, so it only checked `ps`/`nvidia-smi` - DS4 was idle (no `ds4_generate`, GPU ~9%), which is why the builds ran.
+  Before any GPU block > ~15 min, still coordinate with `strata-ds4` (compiles skew its timings).
 
 ## Next (in order)
-1. Configure + build (after DS4 says OK or is idle): CPU tree first for compile errors, e.g.
-   `cmake -B build-glm -DSTRATA_GGML_DIR=$PWD/third_party/llama.cpp -DCMAKE_BUILD_TYPE=Release` (copy the other
-   options from `~/AI/Strata-DS4/build-ds4/CMakeCache.txt`), `nice -n 10 ninja -C build-glm glm_generate_cpu`; then the
-   CUDA tree like `~/AI/Strata-DS4/build-ds4-gpu` (GGML_CUDA=ON, STRATA_GGML_CUDA=ON, CUDA arch 89,
-   STRATA_MMQ_KQUANTS=ON) -> `glm_generate`.
-2. Build the fork (`~/AI/llama.cpp-glm53`, CUDA sm_89, `nice -n 19 -j4`) = the oracle; tokenizer via its
-   `llama-tokenize`, or the upstream tokenizer.json in bench/glm-2026-10-08/upstream/ (chat_template.jinja there too).
-3. Mini fixture `tools/glm/make_mini_glm.py` (glm5-next keys as in the real header: block_count, head_count_kv
-   per-layer array, kda.*, ssm.conv_kernel, attention.*_mla, indexer.*, hyper_connection.*, swiglu_clamp_* arrays,
-   expert_gating_func 2; tensor shapes in ARCHITECTURE.md) -> compare glm_generate_cpu logits vs the fork's
-   llama-cli/eval-callback on it (CPU, no GPU needed).
-4. Real model when downloaded (memguard 84 70, GPU lock, ask strata-ds4): short prompt, compare first-token logits vs
-   the fork; then --dump-routes on a few prompts -> profile -> --profile + --vram-lru tok/s; quality harness port.
-5. Then ARCHITECTURE.md "Decisions" 5-7 (LoRA, speed, Strata-fied MTP, indexer).
+1. **Wire the abliteration LoRA** (loader DONE + verified, `tools/glm/glm_lora.hpp`). Split in two:
+   - **(a) DENSE HALF - IN THE TREE (2026-10-08 late)**: `--lora <adapter.gguf>` on `glm_generate`; `GlmDense` applies
+     the `solo()` deltas in `build_attn` as `y += mul_mat(B, mul_mat(A, x))` for `attn_output` (KDA + MLA inputs) and
+     `ffn_down_shexp` (the SwiGLU output `z`); the A `[in,1]` / B `[1,out]` F32 payloads go in their own backend
+     buffer (`Impl::lctx`/`lbuf`, uploaded in `init`). No-op when `--lora` is absent (all deltas NULL).  NOT yet built
+     or run - verify with `bench/glm-2026-10-08/run_lora.sh` (logits with vs without the adapter).
+   - **(b) ROUTED EXPERTS - NOT WIRED (the abliteration the adapter mostly carries)**. The adapter's
+     `ffn_{gate,up,down}_exps` (layers 3-28, all 288 experts) are Ds4MoeTier's, and the expert math does NOT have a
+     single hook: the CPU path is `pool->run_split_multi_native` (ds4_moe.cpp:1123, from `cpu_run` at :1103), and
+     `gpu_run`/`gpu_run_n`/`gpu_run_chunk` each have their own CPU-pool fallback + the CUDA grouped/MMQ kernels. Plan:
+     (i) add `native_gu_rows_lora` / `native_down_rows_lora` to `src/kernels/cpu/native_expert.{hpp,cpp}` (rank-1:
+     `g += b_g[r]*(a_g.x)`, `u += b_u[r]*(a_u.x)` before the clamp, `out += b_d[r]*(a_d.h)` after) - additive, DS4
+     passes nothing; (ii) a `Ds4ExpertLora` interface on the tier + three `NativeLora1` handles plumbed into the CPU
+     pool's expert jobs; (iii) for the CUDA paths, force LoRA-active (layer, expert) to the CPU tier (their kernel
+     would otherwise silently skip the adapter). Start with `--experts cpu` correctness, then wire the CPU-fallback.
+2. **Warm the expert cache** (independent, cheap, no code): `--dump-routes routes.bin` on a few prompts ->
+   `--profile routes.bin --vram-lru` -> rerun; the 1.75 tok/s is a COLD number (18.6% hit) and should climb.
+   `bench/glm-2026-10-08/run_warm.sh` does both on a 690-token real prompt.
+3. **Real prompt**: ids via the HF `tokenizers` lib on `bench/glm-2026-10-08/upstream/tokenizer.json` (the fork's
+   `llama-tokenize` refuses - its GLM path needs `ctx_other`); prompts in `bench/glm-2026-10-08/prompts/`
+   (`neutral*.i32`, `chat.i32`). Then compare first-token logits vs the fork.
+4. **Fork CUDA oracle build** (`~/AI/llama.cpp-glm53`, sm_89) still TODO (needed for real-model tok/s + the `--lora`
+   reference); its CPU tools are done. `make_mini_glm.py` is fork-loadable EXCEPT the fork's DSA/k-pool path asserts on
+   tiny dims - gate on the real model instead (FINDINGS s3).
+5. **SPEED (Mal's goal: 20+ decode, 300+ prefill; Qwen-Flash-Next level = 50-70 decode / 1500 prefill)**: the two
+   levers not yet switched on are (a) the routing profile (task 2) and (b) **chunked MMQ prefill** - `GlmDense` already
+   supports `max_tokens` up to 64 and the tier has `run_chunk`/`chunk_mmq`, but `glm_generate` still prefils with the
+   one-token decode loop (1.6 tok/s). Wiring `dc.max_tokens = chunk` + `attn_router_n(l, pos0, n)` + `tier.run_chunk`
+   is the prefill path (DS4 measured 392 tok/s chunked). Then ARCHITECTURE.md Decisions 6-7: CUDA graphs, Strata-fied
+   MTP (upstream llama.cpp PR #29928 added GLM5Next MTP support 2026-10-08), the lightning indexer.
 
 ## Rules (non-negotiable; same as DS4)
 - **Every full-model load through `tools/ds4/memguard.sh <cap> <need> -- <cmd>`** (cgroup RAM cap, swap off, shared
@@ -67,9 +114,13 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
   BEFORE the lock, so to queue behind another engine wait first:
   `until flock -n ~/.quetza-data/conductor/ds4-gpu.lock true && [ $(awk '/^MemAvailable:/{print int($2/1048576)}' /proc/meminfo) -ge 70 ]; do sleep 30; done`
 - Before any GPU run: `ss -ltn | grep 8188` (ComfyUI up -> stop and tell Mal) and `nvidia-smi`.
-- **GPU sharing with the DS4 session** over Quetza Relay: it is `strata-ds4`; name this session `strata-glm`
-  (`relay_rename`). Before a GPU block > ~15 min, `relay_ask` it (`need: / for: / eta:`), announce when done; answer
-  its asks with `relay_reply`.
+- **GPU sharing with the DS4 session** over Quetza Relay (use the CLI `~/.local/bin/relay` - the relay MCP tools were
+  NOT available in this session): it is `strata-ds4`; claim this session with `relay rename strata-glm`. Before a GPU
+  block > ~15 min, `relay ask strata-ds4 "need/ for/ eta:"`, announce done. NB: the CLI acts as an ephemeral
+  `relay-cli-<pid>`, and `strata-ds4` connects then disconnects, so a `peer_not_found` just means retry until it is in
+  its connected window; `relay reply` to an older ask can return `unknown_ask` - send a fresh `relay ask` instead.
+- **No builds while the DS4 session is running** - a compile (CMake/ninja/nvcc) skews its benchmark timings. Check
+  `pgrep -af ds4_generate` and `nvidia-smi` first; only let finish a build that is already almost done.
 - Never edit `~/AI/Strata-DS4` or `~/AI/Strata-MiMo` (other sessions' worktrees); read them and `git show` freely.
   Port shared code as your own commits on `glm`. Shared kernels (`src/kernels/`, `include/strata/kernels/`):
   backward-compatible additions only.

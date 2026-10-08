@@ -6,6 +6,7 @@
 // input upload per pass, one router readback per layer, graph reuse) follows tools/ds4/ds4_dense.cpp.
 
 #include "glm_dense.hpp"
+#include "glm_lora.hpp"   // the run-time rank-1 adapter (solo targets: attn_output, ffn_down_shexp)
 
 #include "ggml-alloc.h"
 #include "ggml-cpu.h"
@@ -241,6 +242,9 @@ struct GlmDense::Impl {
     bool gate_taps = false;
     bool allow_long = false;
     WStore w;
+    const strata::glm::LoraAdapter * lora = nullptr;   // run-time rank-1 adapter (solo targets), or NULL
+    ggml_context * lctx = nullptr;                     // LoRA A/B tensors (F32, on `backend`)
+    ggml_backend_buffer_t lbuf = nullptr;
     std::string err;
 
     int64_t D = 0, HC = 0, NH = 0, SK = 0, DI = 0, DC = 0, KVL = 0, KM = 0, VM = 0;
@@ -289,12 +293,16 @@ struct GlmDense::Impl {
         ggml_tensor * ffo = nullptr;     // [D, NT] shared expert (MoE layers) or dense FFN output
         ggml_tensor * t_lout = nullptr;  // [D, HC, NT] tap
         ggml_tensor * rbias = nullptr;   // F32 [NEXP] (input span)
+        // run-time rank-1 LoRA for this layer's whole-module targets (NULL when the adapter has none here):
+        //   _attn: `attn_output` -> A [in,1], B [1,D];   _sh: `ffn_down_shexp` -> A [n_ff_exp,1], B [1,D]
+        ggml_tensor * lo_attn_a = nullptr, * lo_attn_b = nullptr;
+        ggml_tensor * lo_sh_a = nullptr, * lo_sh_b = nullptr;
         ggml_tensor * o_f = nullptr, * o_i = nullptr, * o_span = nullptr;   // router output block
         std::vector<uint8_t> host_out;
         std::vector<float> host_fn, host_lout;
         std::vector<Var> vars;
-        ggml_cgraph * gf_finish[65] = {};
-        ggml_gallocr_t allo_finish[65] = {};
+        std::vector<ggml_cgraph *> gf_finish;      // [NT + 1]
+        std::vector<ggml_gallocr_t> allo_finish;   // [NT + 1] (NULL for n > kSmallN: allo_big)
         ggml_cgraph * gf_predict = nullptr;
         ggml_tensor * predict_out = nullptr;
         ggml_gallocr_t allo_predict = nullptr;
@@ -305,19 +313,48 @@ struct GlmDense::Impl {
     std::vector<ggml_tensor *> logits_t;
     std::vector<float> host_logits;
 
+    // Graphs of up to kSmallN tokens (decode, verify) keep an allocator each (no re-planning per call); prompt-chunk
+    // graphs share ONE allocator (they run one after another, and one buffer per (layer, n) would not fit the card).
+    static constexpr int64_t kSmallN = 4;
+    ggml_gallocr_t allo_big = nullptr;
     ggml_gallocr_t new_allo() const { return ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend)); }
+    // a shared allocator re-plans every call (its buffer may grow and move, and the graphs overlap in it); the
+    // per-graph ones plan once (alloc_graph's uid stamp lets ggml-cuda reuse the captured CUDA graph)
+    bool alloc(ggml_gallocr_t a, ggml_cgraph * g) {
+        if (a == allo_big || a == allo_rows) return ggml_gallocr_alloc_graph(a, g);
+        return alloc_graph(a, g);
+    }
+    ggml_gallocr_t allo_for(int64_t n) {
+        if (n <= kSmallN) return new_allo();
+        if (!allo_big) allo_big = new_allo();
+        return allo_big;
+    }
+    // shared per-pass hand-offs (every layer's attn -> finish runs back to back, so one copy serves all layers)
+    std::vector<uint8_t> host_out;
+    std::vector<float> host_fn;
+    // logits_rows: rows copied out of x_state into hx, then the head over them
+    static constexpr int64_t kRowsMax = 16;
+    ggml_tensor * hx = nullptr;                 // [D, HC, kRowsMax]
+    std::vector<ggml_cgraph *> gf_rows;         // [kRowsMax + 1]
+    std::vector<ggml_tensor *> rows_t;
+    ggml_gallocr_t allo_rows = nullptr;
+    std::vector<uint8_t> host_x;
 
     ~Impl() {
         for (Layer & L : ly) {
-            for (Var & v : L.vars) if (v.allo) ggml_gallocr_free(v.allo);
-            for (ggml_gallocr_t a : L.allo_finish) if (a) ggml_gallocr_free(a);
+            for (Var & v : L.vars) if (v.allo && v.allo != allo_big) ggml_gallocr_free(v.allo);
+            for (ggml_gallocr_t a : L.allo_finish) if (a && a != allo_big) ggml_gallocr_free(a);
             if (L.allo_predict) ggml_gallocr_free(L.allo_predict);
         }
-        for (ggml_gallocr_t a : allo_init) if (a) ggml_gallocr_free(a);
-        for (ggml_gallocr_t a : allo_head) if (a) ggml_gallocr_free(a);
+        for (ggml_gallocr_t a : allo_init) if (a && a != allo_big) ggml_gallocr_free(a);
+        for (ggml_gallocr_t a : allo_head) if (a && a != allo_big) ggml_gallocr_free(a);
+        if (allo_rows) ggml_gallocr_free(allo_rows);
+        if (allo_big) ggml_gallocr_free(allo_big);
         if (sbuf) ggml_backend_buffer_free(sbuf);
         if (ibuf) ggml_backend_buffer_free(ibuf);
         if (obuf) ggml_backend_buffer_free(obuf);
+        if (lbuf) ggml_backend_buffer_free(lbuf);
+        if (lctx) ggml_free(lctx);
         if (sctx) ggml_free(sctx);
         if (ictx) ggml_free(ictx);
         if (gctx) ggml_free(gctx);
@@ -373,12 +410,19 @@ struct B {
     ggml_tensor * hc_post(ggml_tensor * x, ggml_tensor * residual, ggml_tensor * post, ggml_tensor * comb) const {
         return ggml_dsv4_hc_post(c, x, residual, post, comb);
     }
-    // SwiGLU FFN with GLM's clamp (ggml_swiglu_clamp: gate -> min(gate, lim), up -> clamp(up, +-lim))
-    ggml_tensor * ffn(ggml_tensor * x, ggml_tensor * up_w, ggml_tensor * gate_w, ggml_tensor * down_w, float lim) const {
+    // y += B (A x) - the rank-1 adapter merge (A is [in,1], b is [1,out]); a no-op when the adapter has no pair.
+    ggml_tensor * lora_add(ggml_tensor * y, ggml_tensor * a, ggml_tensor * b_, ggml_tensor * x) const {
+        if (!a || !b_) return y;
+        return ggml_add(c, y, ggml_mul_mat(c, b_, ggml_mul_mat(c, a, x)));
+    }
+    // SwiGLU FFN with GLM's clamp (ggml_swiglu_clamp: gate -> min(gate, lim), up -> clamp(up, +-lim)).
+    // a_d/b_d (optional) = a run-time rank-1 adapter on the down projection (ffn_down_shexp).
+    ggml_tensor * ffn(ggml_tensor * x, ggml_tensor * up_w, ggml_tensor * gate_w, ggml_tensor * down_w, float lim,
+                      ggml_tensor * a_d = nullptr, ggml_tensor * b_d = nullptr) const {
         ggml_tensor * up = ggml_mul_mat(c, up_w, x);
         ggml_tensor * gate = ggml_mul_mat(c, gate_w, x);
         ggml_tensor * z = lim > 1e-6f ? ggml_swiglu_clamp(c, gate, up, lim) : ggml_swiglu_split(c, gate, up);
-        return ggml_mul_mat(c, down_w, z);
+        return lora_add(ggml_mul_mat(c, down_w, z), a_d, b_d, z);
     }
     // FLA's l2 norm (glm5-next.cpp build_gdn_l2_norm)
     ggml_tensor * l2(ggml_tensor * x, float eps) const {
@@ -447,7 +491,8 @@ static ggml_cgraph * build_attn(GlmDense::Impl & im, int il, int64_t cap, int64_
         g2 = ggml_reshape_3d(gc, g2, im.SK, NH, n);
         ggml_tensor * on = b.rms_w(ggml_reshape_3d(gc, ggml_cont(gc, o), im.SK, NH, n), b.BL(il, "ssm_norm.weight"));
         ggml_tensor * gated = ggml_mul(gc, on, ggml_sigmoid(gc, g2));
-        attn_out = ggml_mul_mat(gc, b.BL(il, "attn_output.weight"), ggml_cont_2d(gc, gated, im.DI, n));
+        ggml_tensor * ao_in = ggml_cont_2d(gc, gated, im.DI, n);
+        attn_out = b.lora_add(ggml_mul_mat(gc, b.BL(il, "attn_output.weight"), ao_in), L.lo_attn_a, L.lo_attn_b, ao_in);
     } else {
         // nope MLA over every earlier position (phase 1: no indexer - exact up to dense_attn_ctx())
         ggml_tensor * qr = b.rms_w(ggml_mul_mat(gc, b.BL(il, "attn_q_a.weight"), xn), b.BL(il, "attn_q_a_norm.weight"));
@@ -463,7 +508,7 @@ static ggml_cgraph * build_attn(GlmDense::Impl & im, int il, int64_t cap, int64_
         out = ggml_cont(gc, ggml_permute(gc, out, 0, 2, 1, 3));                        // [KVL, n, NH]
         out = ggml_mul_mat(gc, b.BL(il, "attn_v_b.weight"), out);                      // [VM, n, NH]
         out = ggml_cont_2d(gc, ggml_permute(gc, out, 0, 2, 1, 3), im.VM * NH, n);      // [VM*NH, n]
-        attn_out = ggml_mul_mat(gc, b.BL(il, "attn_output.weight"), out);
+        attn_out = b.lora_add(ggml_mul_mat(gc, b.BL(il, "attn_output.weight"), out), L.lo_attn_a, L.lo_attn_b, out);
     }
 
     ggml_tensor * hap = b.hc_post(attn_out, xin, post_a, comb_a);
@@ -492,7 +537,7 @@ static ggml_cgraph * build_attn(GlmDense::Impl & im, int il, int64_t cap, int64_
         ggml_build_forward_expand(gf, ggml_cpy(gc, selected, ggml_view_2d(gc, L.o_i, im.NUSED, n, ob, (size_t) im.o_ids_off)));
         ggml_build_forward_expand(gf, ggml_cpy(gc, wts, ggml_view_2d(gc, L.o_f, im.NUSED, n, ob, (size_t) im.o_wts_off)));
         ffo = b.ffn(fn, b.BL(il, "ffn_up_shexp.weight"), b.BL(il, "ffn_gate_shexp.weight"),
-                    b.BL(il, "ffn_down_shexp.weight"), lim_sh);
+                    b.BL(il, "ffn_down_shexp.weight"), lim_sh, L.lo_sh_a, L.lo_sh_b);
     } else {
         ffo = b.ffn(fn, b.BL(il, "ffn_up.weight"), b.BL(il, "ffn_gate.weight"), b.BL(il, "ffn_down.weight"), lim_sh);
     }
@@ -508,7 +553,7 @@ static ggml_cgraph * build_attn(GlmDense::Impl & im, int il, int64_t cap, int64_
     v.cap = cap;
     v.n = n;
     v.gf = gf;
-    v.allo = im.new_allo();
+    v.allo = im.allo_for(n);
     L.vars.push_back(v);
     return gf;
 }
@@ -531,8 +576,8 @@ static ggml_cgraph * build_finish(GlmDense::Impl & im, int il, int64_t n) {
     if (im.gate_taps)
         ggml_build_forward_expand(gf, ggml_cpy(gc, lout, ggml_view_3d(gc, L.t_lout, D, HC, n, L.t_lout->nb[1],
                                                                       L.t_lout->nb[2], 0)));
-    L.gf_finish[n] = gf;
-    L.allo_finish[n] = im.new_allo();
+    L.gf_finish[(size_t) n] = gf;
+    L.allo_finish[(size_t) n] = im.allo_for(n);
     return gf;
 }
 
@@ -587,12 +632,14 @@ bool GlmDense::Impl::ensure_n(int64_t n) {
     if (n < 1 || n > NT) { err = "pass size " + std::to_string(n) + " out of range 1.." + std::to_string(NT); return false; }
     if (!gf_init[(size_t) n]) {
         gf_init[(size_t) n] = build_init(*this, n);
-        allo_init[(size_t) n] = new_allo();
-        gf_head[(size_t) n] = build_head(*this, n);
-        allo_head[(size_t) n] = new_allo();
+        allo_init[(size_t) n] = allo_for(n);
+        if (n <= kSmallN) {   // a prompt chunk reads its logits through logits_rows
+            gf_head[(size_t) n] = build_head(*this, n);
+            allo_head[(size_t) n] = new_allo();
+        }
     }
     for (int il = 0; il < (int) ly.size(); ++il)
-        if (!ly[(size_t) il].gf_finish[n]) build_finish(*this, il, n);
+        if (!ly[(size_t) il].gf_finish[(size_t) n]) build_finish(*this, il, n);
     return true;
 }
 
@@ -640,7 +687,7 @@ bool GlmDense::init(const std::string & model_path, const GlmDenseConfig & cfg, 
     im.NT = std::max(1, cfg.max_tokens);
     im.CAPMAX = std::max<int64_t>(im.cpu ? 16 : 256, next_pow2(std::max<int64_t>(1, cfg.ctx)));
     if (!im.allow_long && im.CAPMAX > g.dense_attn_ctx()) im.CAPMAX = std::max<int64_t>(im.cpu ? 16 : 256, next_pow2(g.dense_attn_ctx()));
-    if (im.NT > 64) { err = "max_tokens > 64"; return false; }
+    if (im.NT > 4096) { err = "max_tokens > 4096"; return false; }
 
     // ---- persistent state
     ggml_init_params ip = { 64ull * 1024 * 1024, nullptr, true };
@@ -662,15 +709,57 @@ bool GlmDense::init(const std::string & model_path, const GlmDenseConfig & cfg, 
         } else {
             L.kvc = ggml_new_tensor_2d(im.sctx, GGML_TYPE_F16, im.KVL, im.CAPMAX);
         }
-        L.hap = ggml_new_tensor_3d(im.sctx, GGML_TYPE_F32, im.D, im.HC, NT);
-        L.post_f = ggml_new_tensor_2d(im.sctx, GGML_TYPE_F32, im.HC, NT);
-        L.comb_f = ggml_new_tensor_3d(im.sctx, GGML_TYPE_F32, im.HC, im.HC, NT);
-        L.ffo = ggml_new_tensor_2d(im.sctx, GGML_TYPE_F32, im.D, NT);
+        if (il == 0) {   // one set for all layers: layer l's attn -> experts -> finish completes before l+1 starts
+            L.hap = ggml_new_tensor_3d(im.sctx, GGML_TYPE_F32, im.D, im.HC, NT);
+            L.post_f = ggml_new_tensor_2d(im.sctx, GGML_TYPE_F32, im.HC, NT);
+            L.comb_f = ggml_new_tensor_3d(im.sctx, GGML_TYPE_F32, im.HC, im.HC, NT);
+            L.ffo = ggml_new_tensor_2d(im.sctx, GGML_TYPE_F32, im.D, NT);
+        } else {
+            const Impl::Layer & L0 = im.ly[0];
+            L.hap = L0.hap; L.post_f = L0.post_f; L.comb_f = L0.comb_f; L.ffo = L0.ffo;
+        }
+        L.gf_finish.assign((size_t) NT + 1, nullptr);
+        L.allo_finish.assign((size_t) NT + 1, nullptr);
         if (im.gate_taps) {
             L.t_lout = ggml_new_tensor_3d(im.sctx, GGML_TYPE_F32, im.D, im.HC, NT);
             L.host_lout.resize((size_t) (im.D * im.HC));
         }
-        L.host_fn.resize((size_t) (im.D * NT));
+    }
+    im.host_fn.resize((size_t) (im.D * NT));
+    im.hx = ggml_new_tensor_3d(im.sctx, GGML_TYPE_F32, im.D, im.HC, Impl::kRowsMax);
+
+    // ---- run-time rank-1 adapter: the dense half's whole-module targets (`attn_output`, `ffn_down_shexp`).  Each
+    // pair is a bare linear merge y += B (A x), so it is two tiny mul_mats added in the graph; the A [in,1] / B [1,out]
+    // payloads sit in their own backend buffer on the same backend, so the merge stays on device.
+    im.lora = cfg.lora;
+    if (im.lora) {
+        ggml_init_params lp = { 8ull * 1024 * 1024, nullptr, true };
+        im.lctx = ggml_init(lp);
+        if (!im.lctx) { err = "ggml_init(lora) failed"; return false; }
+        auto mk_pair = [&](const strata::glm::Lora1 * p, ggml_tensor ** pa, ggml_tensor ** pb) {
+            if (!p) { *pa = *pb = nullptr; return; }
+            *pa = ggml_new_tensor_2d(im.lctx, GGML_TYPE_F32, (int64_t) p->a.size(), 1);
+            *pb = ggml_new_tensor_2d(im.lctx, GGML_TYPE_F32, 1, (int64_t) p->b.size());
+        };
+        for (int64_t il = 0; il < g.n_layer; ++il) {
+            Impl::Layer & L = im.ly[(size_t) il];
+            mk_pair(im.lora->solo(il, strata::glm::LoraAdapter::ATTN_OUT), &L.lo_attn_a, &L.lo_attn_b);
+            mk_pair(im.lora->solo(il, strata::glm::LoraAdapter::SHEXP_DOWN), &L.lo_sh_a, &L.lo_sh_b);
+        }
+        im.lbuf = ggml_backend_alloc_ctx_tensors_from_buft(im.lctx, ggml_backend_get_default_buffer_type(im.backend));
+        if (!im.lbuf) { err = "cannot allocate the LoRA tensors"; return false; }
+        for (int64_t il = 0; il < g.n_layer; ++il) {
+            Impl::Layer & L = im.ly[(size_t) il];
+            const strata::glm::Lora1 * p;
+            if ((p = im.lora->solo(il, strata::glm::LoraAdapter::ATTN_OUT))) {
+                ggml_backend_tensor_set(L.lo_attn_a, p->a.data(), 0, p->a.size() * sizeof(float));
+                ggml_backend_tensor_set(L.lo_attn_b, p->b.data(), 0, p->b.size() * sizeof(float));
+            }
+            if ((p = im.lora->solo(il, strata::glm::LoraAdapter::SHEXP_DOWN))) {
+                ggml_backend_tensor_set(L.lo_sh_a, p->a.data(), 0, p->a.size() * sizeof(float));
+                ggml_backend_tensor_set(L.lo_sh_b, p->b.data(), 0, p->b.size() * sizeof(float));
+            }
+        }
     }
     im.sbuf = ggml_backend_alloc_ctx_tensors_from_buft(im.sctx, ggml_backend_get_default_buffer_type(im.backend));
     if (!im.sbuf) { err = "cannot allocate the decode state"; return false; }
@@ -704,20 +793,20 @@ bool GlmDense::init(const std::string & model_path, const GlmDenseConfig & cfg, 
     const size_t o1 = up(ggml_row_size(GGML_TYPE_F32, im.D)), o2 = o1 + up(4 * im.NUSED), blk = o2 + up(4 * im.NUSED);
     im.o_blk = (int64_t) blk; im.o_ids_off = (int64_t) o1; im.o_wts_off = (int64_t) o2;
     const size_t lblk = blk * (size_t) NT;
-    im.obuf = ggml_backend_buft_alloc_buffer(buft, lblk * (size_t) g.n_layer + al);
+    im.obuf = ggml_backend_buft_alloc_buffer(buft, lblk + al);   // shared by every layer (see the hand-offs)
     if (!im.obuf) { err = "cannot allocate the router output blocks"; return false; }
     {
         uint8_t * ob = (uint8_t *) ggml_backend_buffer_get_base(im.obuf);
         for (int64_t il = 0; il < g.n_layer; ++il) {
             Impl::Layer & L = im.ly[(size_t) il];
-            uint8_t * b0 = ob + (size_t) il * lblk;
+            uint8_t * b0 = ob;
             L.o_f = ggml_new_tensor_1d(im.ictx, GGML_TYPE_F32, (int64_t) (lblk / 4));
             L.o_i = ggml_new_tensor_1d(im.ictx, GGML_TYPE_I32, (int64_t) (lblk / 4));
             L.o_span = ggml_new_tensor_1d(im.ictx, GGML_TYPE_I8, (int64_t) lblk);
             for (ggml_tensor * t : { L.o_f, L.o_i, L.o_span })
                 if (ggml_backend_tensor_alloc(im.obuf, t, b0) != GGML_STATUS_SUCCESS) { err = "cannot place a router block"; return false; }
-            L.host_out.assign(lblk, 0);
         }
+        im.host_out.assign(lblk, 0);
     }
 
     ggml_init_params gp = { 512ull * 1024 * 1024, nullptr, true };
@@ -745,7 +834,7 @@ void GlmDense::reset() {
 bool GlmDense::begin_tokens(const int * tids, int n) {
     Impl & im = *p_;
     if (!im.ensure_n(n)) return false;
-    if (!alloc_graph(im.allo_init[(size_t) n], im.gf_init[(size_t) n])) { im.err = "gallocr(init) failed"; return false; }
+    if (!im.alloc(im.allo_init[(size_t) n], im.gf_init[(size_t) n])) { im.err = "gallocr(init) failed"; return false; }
     im.host_emb.resize((size_t) (im.D * n));
     for (int t = 0; t < n; ++t) {
         if (tids[t] < 0 || tids[t] >= im.g.vocab) { im.err = "token id out of range"; return false; }
@@ -768,7 +857,7 @@ bool GlmDense::predict(int il, int * top_ids, int n_top) {
     Impl::Layer & L = im.ly[(size_t) il];
     for (int i = 0; i < n_top; ++i) top_ids[i] = -1;
     if (!L.routed) return false;
-    if (!alloc_graph(L.allo_predict, L.gf_predict)) { im.err = "gallocr(predict) failed"; return false; }
+    if (!im.alloc(L.allo_predict, L.gf_predict)) { im.err = "gallocr(predict) failed"; return false; }
     if (ggml_backend_graph_compute(im.backend, L.gf_predict) != GGML_STATUS_SUCCESS) { im.err = "predict compute failed"; return false; }
     std::vector<float> sel((size_t) ggml_nelements(L.predict_out));
     ggml_backend_tensor_get(L.predict_out, sel.data(), 0, sel.size() * 4);
@@ -811,7 +900,7 @@ bool GlmDense::attn_router_n(int il, int pos0, int n, int * routed_ids, float * 
     Impl::Var * var = nullptr;
     for (Impl::Var & v : L.vars) if (v.cap == cap && v.n == n) { var = &v; break; }
     if (!var) { build_attn(im, il, cap, n); var = &L.vars.back(); }
-    if (!alloc_graph(var->allo, var->gf)) { im.err = "gallocr(attn) failed"; return false; }
+    if (!im.alloc(var->allo, var->gf)) { im.err = "gallocr(attn) failed"; return false; }
 
     // inputs: one upload per pass (positions or capacity changed, or a route bias was set)
     const int64_t mcap = im.cap_for(pos_last);
@@ -831,10 +920,10 @@ bool GlmDense::attn_router_n(int il, int pos0, int n, int * routed_ids, float * 
 
     // one readback: n blocks [fn | ids | wts]
     const size_t ob = (size_t) im.o_blk;
-    ggml_backend_tensor_get(L.o_span, L.host_out.data(), 0, ob * (size_t) n);
+    ggml_backend_tensor_get(L.o_span, im.host_out.data(), 0, ob * (size_t) n);
     for (int t = 0; t < n; ++t) {
-        const uint8_t * blk = L.host_out.data() + (size_t) t * ob;
-        std::memcpy(L.host_fn.data() + (size_t) t * im.D, blk, (size_t) im.D * 4);
+        const uint8_t * blk = im.host_out.data() + (size_t) t * ob;
+        std::memcpy(im.host_fn.data() + (size_t) t * im.D, blk, (size_t) im.D * 4);
         if (L.routed) {
             const int32_t * ids = (const int32_t *) (blk + im.o_ids_off);
             const float * w = (const float *) (blk + im.o_wts_off);
@@ -844,7 +933,7 @@ bool GlmDense::attn_router_n(int il, int pos0, int n, int * routed_ids, float * 
             }
         }
     }
-    if (ffn_norm_host) *ffn_norm_host = L.host_fn.data();
+    if (ffn_norm_host) *ffn_norm_host = im.host_fn.data();
     return true;
 }
 
@@ -856,17 +945,51 @@ bool GlmDense::finish_layer_n(int il, int n, const float * routed_sum) {
         if (!routed_sum) { im.err = "finish_layer: routed sum missing"; return false; }
         ggml_backend_tensor_set(im.routed_sum, routed_sum, 0, (size_t) (im.D * n) * 4);
     }
-    if (!alloc_graph(L.allo_finish[n], L.gf_finish[n])) { im.err = "gallocr(finish) failed"; return false; }
-    if (ggml_backend_graph_compute(im.backend, L.gf_finish[n]) != GGML_STATUS_SUCCESS) { im.err = "finish compute failed"; return false; }
+    if (!im.ensure_n(n)) return false;
+    if (!im.alloc(L.allo_finish[(size_t) n], L.gf_finish[(size_t) n])) { im.err = "gallocr(finish) failed"; return false; }
+    if (ggml_backend_graph_compute(im.backend, L.gf_finish[(size_t) n]) != GGML_STATUS_SUCCESS) { im.err = "finish compute failed"; return false; }
     if (im.gate_taps)
         ggml_backend_tensor_get(L.t_lout, L.host_lout.data(), (size_t) (n - 1) * L.t_lout->nb[2], L.host_lout.size() * 4);
+    return true;
+}
+
+bool GlmDense::logits_rows(int r0, int nr, float * out) {
+    Impl & im = *p_;
+    if (nr < 1 || nr > Impl::kRowsMax || r0 < 0 || r0 + nr > im.NT) { im.err = "logits_rows: bad rows"; return false; }
+    if (im.gf_rows.empty()) {
+        im.gf_rows.assign((size_t) Impl::kRowsMax + 1, nullptr);
+        im.rows_t.assign((size_t) Impl::kRowsMax + 1, nullptr);
+        im.allo_rows = im.new_allo();
+    }
+    if (!im.gf_rows[(size_t) nr]) {   // the head over hx's first nr rows (build_head's math)
+        ggml_context * gc = im.gctx;
+        ggml_cgraph * gf = ggml_new_graph_custom(gc, 64, false);
+        B b { &im, gc, &im.g };
+        ggml_tensor * x = ggml_view_3d(gc, im.hx, im.D, im.HC, nr, im.hx->nb[1], im.hx->nb[2], 0);
+        ggml_tensor * acc = ggml_view_2d(gc, x, im.D, nr, x->nb[2], 0);
+        for (int64_t s = 1; s < im.HC; ++s) acc = ggml_add(gc, acc, ggml_view_2d(gc, x, im.D, nr, x->nb[2], (size_t) s * x->nb[1]));
+        acc = ggml_scale(gc, acc, 1.0f / (float) im.HC);
+        ggml_tensor * lg = ggml_mul_mat(gc, b.W("output.weight"), b.rms_w(acc, b.W("output_norm.weight")));
+        ggml_set_output(lg);
+        ggml_build_forward_expand(gf, lg);
+        im.gf_rows[(size_t) nr] = gf;
+        im.rows_t[(size_t) nr] = lg;
+    }
+    const size_t slab = im.x_state->nb[2];
+    im.host_x.resize(slab * (size_t) nr);
+    ggml_backend_tensor_get(im.x_state, im.host_x.data(), slab * (size_t) r0, slab * (size_t) nr);
+    ggml_backend_tensor_set(im.hx, im.host_x.data(), 0, slab * (size_t) nr);
+    if (!im.alloc(im.allo_rows, im.gf_rows[(size_t) nr])) { im.err = "gallocr(rows) failed"; return false; }
+    if (ggml_backend_graph_compute(im.backend, im.gf_rows[(size_t) nr]) != GGML_STATUS_SUCCESS) { im.err = "rows head failed"; return false; }
+    ggml_backend_tensor_get(im.rows_t[(size_t) nr], out, 0, (size_t) (im.g.vocab * nr) * 4);
     return true;
 }
 
 bool GlmDense::logits_n(int n, const float ** out, int * n_vocab) {
     Impl & im = *p_;
     if (!im.ensure_n(n)) return false;
-    if (!alloc_graph(im.allo_head[(size_t) n], im.gf_head[(size_t) n])) { im.err = "gallocr(head) failed"; return false; }
+    if (!im.gf_head[(size_t) n]) { im.err = "logits_n: n > 4 (prompt chunk): use logits_rows"; return false; }
+    if (!im.alloc(im.allo_head[(size_t) n], im.gf_head[(size_t) n])) { im.err = "gallocr(head) failed"; return false; }
     if (ggml_backend_graph_compute(im.backend, im.gf_head[(size_t) n]) != GGML_STATUS_SUCCESS) { im.err = "head compute failed"; return false; }
     ggml_backend_tensor_get(im.logits_t[(size_t) n], im.host_logits.data(), 0, (size_t) (im.g.vocab * n) * 4);
     *out = im.host_logits.data();

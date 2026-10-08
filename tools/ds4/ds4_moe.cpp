@@ -285,6 +285,9 @@ struct Ds4MoeImpl {
     std::vector<cpu::ExpertJobMulti> jobs;
     std::vector<uint8_t> ftmp;        ///< the file tier's read buffer, top_k blobs
     Ds4MoeStats st;
+    std::vector<double> sal_sum;      ///< REAP: sum over routed tokens of w * ||expert output|| (cfg.saliency)
+    std::vector<int64_t> sal_cnt;
+    std::vector<float> sal_parts;
     bool inited = false;
     int64_t admitted = 0;
     double pcie_carry = 0.0, pf_carry = 0.0;
@@ -2268,6 +2271,32 @@ bool gpu_run_chunk(Ds4MoeImpl& im, int64_t layer, int n, const int32_t* ids, con
     const double ts = now_ms();
     ck(cudaStreamSynchronize(gp.s), "chunk sync");
     if (!out_dev) std::memcpy(out, gp.c_hparts, (size_t) n * (size_t) H * 4);
+    if (im.cfg.saliency) {   // REAP calibration: every entry's unweighted output row, back to the host
+        im.sal_parts.resize((size_t) NE * (size_t) H);
+        ck(cudaMemcpy(im.sal_parts.data(), gp.c_parts, sizeof(float) * im.sal_parts.size(), cudaMemcpyDeviceToHost), "sal d2h");
+        const int64_t NX = im.g.n_experts;
+        if (im.sal_sum.empty()) {
+            im.sal_sum.assign((size_t) (im.g.n_layers * NX), 0.0);
+            im.sal_cnt.assign((size_t) (im.g.n_layers * NX), 0);
+        }
+        std::vector<double> nrm((size_t) NE);
+        std::vector<std::thread> th;
+        for (int q = 0; q < 8; ++q)
+            th.emplace_back([&, q]() {
+                for (int64_t j = q; j < NE; j += 8) {
+                    const float* r = im.sal_parts.data() + (size_t) j * (size_t) H;
+                    double a2 = 0;
+                    for (int64_t d = 0; d < H; ++d) a2 += (double) r[d] * r[d];
+                    nrm[(size_t) j] = std::sqrt(a2);
+                }
+            });
+        for (auto& t : th) t.join();
+        for (int64_t j = 0; j < NE; ++j) {
+            const size_t at = (size_t) (layer * NX + ids[j]);
+            im.sal_sum[at] += (double) w[j] * nrm[(size_t) j];
+            ++im.sal_cnt[at];
+        }
+    }
     if (prof) {
         g_cprof.sync += now_ms() - ts;
         for (size_t i = 0; i < kev.size(); ++i) {
@@ -2333,6 +2362,9 @@ bool Ds4MoeTier::build_arena_from_routes(const std::string& routes_bin, int batc
     }
     return build_arena(arena_order(*im_, ranked), err);
 }
+
+const std::vector<double>& Ds4MoeTier::saliency_sum() const { return im_->sal_sum; }
+const std::vector<int64_t>& Ds4MoeTier::saliency_count() const { return im_->sal_cnt; }
 
 void Ds4MoeTier::release_chunk() {
 #if defined(DS4_MOE_CUDA)
@@ -2464,6 +2496,11 @@ const char* Ds4MoeTier::mode() const {
 }
 
 int64_t Ds4MoeTier::resident() const { return im_->admitted; }
+int64_t Ds4MoeTier::blob_bytes(int64_t layer) const {
+    if (layer < 0 || layer >= (int64_t) im_->bl.size()) return 0;
+    return im_->bl[(size_t) layer];
+}
+
 int64_t Ds4MoeTier::file_tier() const {
 #if defined(DS4_MOE_CUDA)
     return im_->gpu ? im_->gpu->arena.file_tier : 0;

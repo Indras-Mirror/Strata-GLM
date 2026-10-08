@@ -14,6 +14,7 @@
 // Ds4MoeTier::seed_from_routes(file, 512) ranks) - a GLM routing profile for --profile.  Without --profile the
 // arena and VRAM cache are filled in (layer, expert) index order.
 #include "glm_dense.hpp"
+#include "glm_lora.hpp"
 #include "ds4_moe.hpp"
 
 #include "ggml.h"
@@ -33,17 +34,19 @@
 namespace {
 
 struct Args {
-    std::string model, ids_csv, ids_file, profile, dump_logits, dump_routes;
+    std::string model, ids_csv, ids_file, profile, dump_logits, dump_routes, lora, saliency, prune;
     int n_predict = 64;
     std::string backend = "cuda", experts = "gpu";
     int64_t slots = 0;   // 0 = auto
     double vram_margin_gib = 1.0, pcie = 0.25, pf_b = 1.43, arena_gib = 60.0;
     int threads = 0;
     int64_t ctx = 0;
-    float temp = 0.0f, route_bias = 0.0f;
+    float temp = 0.0f, route_bias = 0.0f, prune_penalty = 0.0f, skip_miss = 0.0f;
     uint64_t seed = 1;
     std::vector<int> stop;
     bool ppl = false, vram_lru = false, arena_adapt = false, arena_skip = false;
+    int prefill_chunk = 0;           // --prefill-chunk N: the prompt in passes of N tokens (0 = the decode loop)
+    bool chunk_mmq = false, chunk_prestage = false, allow_long = false;
 };
 
 std::vector<int> parse_csv(const std::string & s) {
@@ -81,11 +84,20 @@ bool parse(int argc, char ** argv, Args & a) {
         else if (k == "--stop") a.stop = parse_csv(next());
         else if (k == "--dump-logits") a.dump_logits = next();
         else if (k == "--dump-routes") a.dump_routes = next();
+        else if (k == "--lora") a.lora = next();
         else if (k == "--ppl") a.ppl = true;
         else if (k == "--route-bias") a.route_bias = (float) std::atof(next().c_str());
         else if (k == "--vram-lru") a.vram_lru = true;
         else if (k == "--arena-adapt") a.arena_adapt = true;
         else if (k == "--arena-skip-resident") a.arena_skip = true;
+        else if (k == "--prefill-chunk") a.prefill_chunk = std::atoi(next().c_str());
+        else if (k == "--chunk-mmq") a.chunk_mmq = true;
+        else if (k == "--chunk-prestage") a.chunk_prestage = true;
+        else if (k == "--allow-long-ctx") a.allow_long = true;
+        else if (k == "--saliency") a.saliency = next();
+        else if (k == "--prune") a.prune = next();
+        else if (k == "--skip-miss") a.skip_miss = (float) std::atof(next().c_str());
+        else if (k == "--prune-penalty") a.prune_penalty = (float) std::atof(next().c_str());
         else { std::fprintf(stderr, "glm_generate: unknown argument %s\n", k.c_str()); return false; }
     }
     return !a.model.empty() && (!a.ids_csv.empty() || !a.ids_file.empty());
@@ -116,7 +128,8 @@ int main(int argc, char ** argv) {
     if (!parse(argc, argv, a)) {
         std::fprintf(stderr, "usage: glm_generate -m model.gguf (--ids 1,2,3 | --ids-file f.i32) [-n 64] [--backend cuda|cpu]\n"
                              "       [--experts gpu|cpu] [--slots auto|N] [--arena-gib 60] [--profile routes.bin] [--vram-lru]\n"
-                             "       [--route-bias X] [--ctx N] [--temp 0] [--stop id,id] [--ppl] [--dump-logits f] [--dump-routes f]\n");
+                             "       [--route-bias X] [--ctx N] [--temp 0] [--stop id,id] [--ppl] [--dump-logits f] [--dump-routes f]\n"
+                             "       [--lora adapter.gguf] [--prefill-chunk N [--chunk-mmq] [--chunk-prestage]] [--allow-long-ctx]\n");
         return 2;
     }
     std::vector<int> prompt = a.ids_csv.empty() ? std::vector<int>() : parse_csv(a.ids_csv);
@@ -136,12 +149,23 @@ int main(int argc, char ** argv) {
     std::fprintf(stderr, "dense backend: %s\n", ggml_backend_name(be));
 
     const double t_load0 = now_ms();
+    strata::glm::LoraAdapter lora_ad;
+    if (!a.lora.empty()) {
+        std::string lerr;
+        if (!lora_ad.load(a.lora, lerr)) { std::fprintf(stderr, "glm_generate: lora: %s\n", lerr.c_str()); return 1; }
+        std::fprintf(stderr, "lora: %s - dense half will apply %sattn_output + %sffn_down_shexp; routed-expert exps are "
+                             "NOT applied yet (CPU-path slice pending)\n",
+                     a.lora.c_str(), lora_ad.any(strata::glm::LoraAdapter::ATTN_OUT) ? "" : "(no) ",
+                     lora_ad.any(strata::glm::LoraAdapter::SHEXP_DOWN) ? "" : "(no) ");
+    }
     GlmDense dense;
     GlmDenseConfig dc;
     dc.backend = be;
+    dc.lora = a.lora.empty() ? nullptr : &lora_ad;
     dc.n_threads = a.threads > 0 ? a.threads : 8;
     dc.ctx = a.ctx > 0 ? a.ctx : (int64_t) prompt.size() + a.n_predict + 8;
-    dc.max_tokens = 1;
+    dc.max_tokens = std::max(1, a.prefill_chunk);
+    dc.allow_long_ctx = a.allow_long;
     std::string err;
     if (!dense.init(a.model, dc, err)) { std::fprintf(stderr, "glm_generate: dense init: %s\n", err.c_str()); return 1; }
     const GlmGeometry & G = dense.geom();
@@ -150,6 +174,7 @@ int main(int argc, char ** argv) {
                  (long long) std::count(G.is_kda.begin(), G.is_kda.end(), true),
                  (long long) std::count(G.is_kda.begin(), G.is_kda.end(), false), (long long) G.n_expert,
                  (long long) G.n_expert_used, (long long) G.vocab, (now_ms() - t_load0) / 1000.0);
+    double slot_gib_auto = 0;
     if (a.slots <= 0 && a.experts != "cpu") {
         size_t fr = 0, tot = 0;
         ggml_backend_dev_memory(ggml_backend_get_device(be), &fr, &tot);
@@ -157,14 +182,18 @@ int main(int argc, char ** argv) {
         // blob_bytes after init would be exact; use the Q4_K size here (conservative), the tier caps at what fits
         const double blob = 3.0 * (double) G.n_embd * G.n_ff_exp * 0.5625;
         a.slots = std::max<int64_t>(0, (int64_t) (((double) fr - a.vram_margin_gib * 1073741824.0) / blob));
-        std::fprintf(stderr, "slots auto: %.2f GiB free after the dense half -> %lld slots (margin %.2f GiB)\n",
-                     fr / 1073741824.0, (long long) a.slots, a.vram_margin_gib);
+        // the cache is sized by BYTES (slot_gib, per-layer blob sizes): most GLM layers are Q2_K (~8.3 MB), so a
+        // Q4_K-sized count would leave ~40% of the budget empty
+        slot_gib_auto = std::max(0.0, ((double) fr - a.vram_margin_gib * 1073741824.0) / 1073741824.0);
+        std::fprintf(stderr, "slots auto: %.2f GiB free after the dense half -> %.2f GiB of expert slots (margin %.2f GiB)\n",
+                     fr / 1073741824.0, slot_gib_auto, a.vram_margin_gib);
     }
 
     namespace ds4 = strata::ds4;
     ds4::Ds4MoeTier tier;
     ds4::Ds4MoeConfig mc;
-    mc.slots = a.slots;
+    mc.slots = slot_gib_auto > 0 ? G.n_layer * G.n_expert : a.slots;
+    mc.slot_gib = slot_gib_auto;
     mc.pcie_frac = a.pcie;
     mc.pf_b = a.pf_b;
     mc.threads = a.threads;
@@ -174,16 +203,45 @@ int main(int argc, char ** argv) {
     mc.vram_lru = a.vram_lru;
     mc.arena_adapt = a.arena_adapt;
     mc.arena_skip_resident = a.arena_skip;
+    mc.chunk_mmq = a.chunk_mmq;
+    mc.chunk_prestage = a.chunk_prestage;
+    mc.saliency = !a.saliency.empty();
+    mc.skip_miss = a.skip_miss;   // decode: drop a VRAM-miss expert weighing < skip_miss x the token's weight sum
+    if (mc.saliency && a.prefill_chunk <= 0) { std::fprintf(stderr, "glm_generate: --saliency needs --prefill-chunk\n"); return 2; }
+    // --prune FILE: "layer expert" lines; those experts are never routed (selection bias -1e30, REAP-style pruning)
+    // and never take arena/VRAM space, so a pruned set that fits RAM+VRAM never touches the file tier.
+    // --prune-penalty X: soft pruning - the bias is -X instead, so a pruned expert still wins when the router wants
+    // it by more than X (it is then read from the file tier); 0 = the hard mask.
+    std::vector<char> pruned((size_t) (G.n_layer * G.n_expert), 0);
+    int64_t n_pruned = 0;
+    if (!a.prune.empty()) {
+        std::FILE * pf = std::fopen(a.prune.c_str(), "r");
+        if (!pf) { std::fprintf(stderr, "glm_generate: cannot open %s\n", a.prune.c_str()); return 2; }
+        long l, e;
+        while (std::fscanf(pf, "%ld %ld", &l, &e) == 2)
+            if (l >= 0 && l < G.n_layer && e >= 0 && e < G.n_expert && G.routed(l) && !pruned[(size_t) (l * G.n_expert + e)]) {
+                pruned[(size_t) (l * G.n_expert + e)] = 1;
+                ++n_pruned;
+            }
+        std::fclose(pf);
+        std::fprintf(stderr, "prune: %lld (layer, expert) pairs masked out of routing (%s)\n", (long long) n_pruned, a.prune.c_str());
+    }
+    auto is_pruned = [&](int64_t l, int64_t e) { return pruned[(size_t) (l * G.n_expert + e)] != 0; };
     if (!tier.init(a.model, mc, err)) { std::fprintf(stderr, "glm_generate: tier init: %s\n", err.c_str()); return 1; }
     const ds4::Ds4MoeGeom & TG = tier.geom();
     if (!mc.cpu_only) {
         bool ok;
-        if (!a.profile.empty()) ok = tier.seed_from_routes(a.profile, 512, err);
-        else {   // no profile: index order (a GLM profile comes from --dump-routes)
+        if (!a.profile.empty() && n_pruned == 0) ok = tier.seed_from_routes(a.profile, 512, err);
+        else {   // no profile (or a prune mask): index order over the kept experts (GLM routing is near-flat)
+            // smallest blobs first: with near-flat routing a VRAM slot's worth is one expert whatever its size, so
+            // the Q2_K layers fill the cache (most experts per GiB) and the arena takes the rest
+            std::vector<int64_t> lorder;
+            for (int64_t l = 0; l < TG.n_layers; ++l) if (TG.routed(l)) lorder.push_back(l);
+            std::stable_sort(lorder.begin(), lorder.end(), [&](int64_t x, int64_t y) { return tier.blob_bytes(x) < tier.blob_bytes(y); });
             std::vector<std::pair<int32_t, int32_t>> ranked;
-            for (int64_t l = 0; l < TG.n_layers; ++l)
-                if (TG.routed(l))
-                    for (int64_t e = 0; e < TG.n_experts; ++e) ranked.emplace_back((int32_t) l, (int32_t) e);
+            for (int64_t l : lorder)
+                for (int64_t e = 0; e < TG.n_experts; ++e)
+                    if (!is_pruned(l, e)) ranked.emplace_back((int32_t) l, (int32_t) e);
             ok = tier.seed_from_ranked(ranked, err);
         }
         if (!ok) { std::fprintf(stderr, "glm_generate: seed: %s\n", err.c_str()); return 1; }
@@ -217,15 +275,21 @@ int main(int argc, char ** argv) {
     };
     if (rfile) rblock.assign((size_t) RB * routed_layers.size() * top_k, 0);
 
+    // selection-only bias per layer: -1e30 on pruned experts, + route_bias on resident ones (cache-aware routing)
+    auto set_bias = [&]() {
+        for (int l = 0; l < n_layer; ++l) {
+            if (!G.routed(l)) continue;
+            for (int64_t e = 0; e < G.n_expert; ++e)
+                rb[(size_t) e] = is_pruned(l, e) ? (a.prune_penalty > 0 ? -a.prune_penalty : -1e30f)
+                               : (a.route_bias != 0.0f && !mc.cpu_only && tier.resident(l, e)) ? a.route_bias : 0.0f;
+            dense.set_route_bias(l, rb.data());
+        }
+    };
+    if (n_pruned > 0) set_bias();
     double t_ph[5] = { 0, 0, 0, 0, 0 };
     bool timing = false;
     auto step = [&](int tid, int pos) -> bool {
-        if (a.route_bias != 0.0f && !mc.cpu_only)
-            for (int l = 0; l < n_layer; ++l) {
-                if (!G.routed(l)) continue;
-                for (int64_t e = 0; e < G.n_expert; ++e) rb[(size_t) e] = tier.resident(l, e) ? a.route_bias : 0.0f;
-                dense.set_route_bias(l, rb.data());
-            }
+        if (a.route_bias != 0.0f && !mc.cpu_only) set_bias();
         if (!dense.begin_token(tid)) return false;
         int ri = 0;
         for (int l = 0; l < n_layer; ++l) {
@@ -265,7 +329,88 @@ int main(int argc, char ** argv) {
     const double t_pf0 = now_ms();
     double nll = 0;
     int n_scored = 0;
-    for (size_t i = 0; i < prompt.size(); ++i) {
+    std::vector<float> first_logits;   // chunked prefill: the prompt's last row
+    double pc_attn = 0, pc_exp = 0, pc_fin = 0, pc_head = 0;
+    if (a.prefill_chunk > 0) {
+        const int NP = a.prefill_chunk;
+        std::vector<int> cids((size_t) NP * top_k);
+        std::vector<int32_t> cids32((size_t) NP * top_k);
+        std::vector<float> cw((size_t) NP * top_k), crouted((size_t) NP * n_embd), lrows;
+        const int LR = 16;
+        for (size_t c0 = 0; c0 < prompt.size(); c0 += (size_t) NP) {
+            const int n = (int) std::min<size_t>((size_t) NP, prompt.size() - c0);
+            if (a.route_bias != 0.0f && !mc.cpu_only) set_bias();
+            if (!dense.begin_tokens(prompt.data() + c0, n)) { std::fprintf(stderr, "glm_generate: %s\n", dense.last_error().c_str()); return 1; }
+            int ri = 0;
+            for (int l = 0; l < n_layer; ++l) {
+                const bool moe = G.routed(l);
+                double t0 = now_ms();
+                const float * x = nullptr;
+                if (!dense.attn_router_n(l, (int) c0, n, cids.data(), cw.data(), &x)) {
+                    std::fprintf(stderr, "glm_generate: chunk at %zu layer %d: %s\n", c0, l, dense.last_error().c_str());
+                    return 1;
+                }
+                double t1 = now_ms(); pc_attn += t1 - t0; t0 = t1;
+                if (moe) {
+                    for (int k = 0; k < n * top_k; ++k) cids32[(size_t) k] = cids[(size_t) k];
+                    if (rfile)
+                        for (int t = 0; t < n; ++t) {
+                            if (rblock_n + t >= RB) break;
+                            uint16_t * dst = rblock.data() + ((size_t) ri * RB + rblock_n + t) * top_k;
+                            for (int k = 0; k < top_k; ++k) dst[k] = (uint16_t) cids[(size_t) (t * top_k + k)];
+                        }
+                    if (!tier.run_chunk(l, n, cids32.data(), cw.data(), x, crouted.data())) {
+                        std::fprintf(stderr, "glm_generate: tier.run_chunk refused at layer %d\n", l);
+                        return 1;
+                    }
+                    ++ri;
+                }
+                t1 = now_ms(); pc_exp += t1 - t0; t0 = t1;
+                if (!dense.finish_layer_n(l, n, moe ? crouted.data() : nullptr)) { std::fprintf(stderr, "glm_generate: %s\n", dense.last_error().c_str()); return 1; }
+                pc_fin += now_ms() - t0;
+            }
+            if (rfile) {   // whole 512-token blocks only (a chunk may straddle a block edge: the excess is dropped)
+                rblock_n = std::min(RB, rblock_n + n);
+                if (rblock_n == RB) flush_routes(false);
+            }
+            const double th = now_ms();
+            if (a.ppl) {   // rows whose next token is in the prompt
+                const int last = (int) std::min<size_t>((size_t) n, prompt.size() - 1 - c0);
+                for (int r0 = 0; r0 < last; r0 += LR) {
+                    const int nr = std::min(LR, last - r0);
+                    lrows.resize((size_t) nr * (size_t) G.vocab);
+                    if (!dense.logits_rows(r0, nr, lrows.data())) { std::fprintf(stderr, "glm_generate: %s\n", dense.last_error().c_str()); return 1; }
+                    for (int r = 0; r < nr; ++r) {
+                        const float * l = lrows.data() + (size_t) r * G.vocab;
+                        const float mx = *std::max_element(l, l + G.vocab);
+                        double z = 0;
+                        for (int64_t v = 0; v < G.vocab; ++v) z += std::exp((double) (l[v] - mx));
+                        nll += (std::log(z) + mx) - l[prompt[c0 + (size_t) (r0 + r) + 1]];
+                        ++n_scored;
+                    }
+                }
+            }
+            if (c0 + (size_t) n == prompt.size()) {
+                first_logits.resize((size_t) G.vocab);
+                if (!dense.logits_rows(n - 1, 1, first_logits.data())) { std::fprintf(stderr, "glm_generate: %s\n", dense.last_error().c_str()); return 1; }
+            }
+            pc_head += now_ms() - th;
+        }
+        if (!a.saliency.empty()) {   // [i32 n_layer][i32 n_expert][f64 sum x L*E][i64 count x L*E]
+            const std::vector<double> & ss = tier.saliency_sum();
+            const std::vector<int64_t> & sc = tier.saliency_count();
+            std::FILE * sf = std::fopen(a.saliency.c_str(), "wb");
+            if (!sf || ss.empty()) { std::fprintf(stderr, "glm_generate: cannot write saliency %s\n", a.saliency.c_str()); return 1; }
+            const int32_t hdr[2] = { (int32_t) TG.n_layers, (int32_t) TG.n_experts };
+            std::fwrite(hdr, 4, 2, sf);
+            std::fwrite(ss.data(), 8, ss.size(), sf);
+            std::fwrite(sc.data(), 8, sc.size(), sf);
+            std::fclose(sf);
+            std::fprintf(stderr, "saliency: %s (%zu entries)\n", a.saliency.c_str(), ss.size());
+        }
+        tier.release_chunk();
+    }
+    for (size_t i = 0; a.prefill_chunk <= 0 && i < prompt.size(); ++i) {
         if (!step(prompt[i], (int) i)) {
             std::fprintf(stderr, "glm_generate: prefill failed at %zu: %s\n", i, dense.last_error().c_str());
             return 1;
@@ -294,7 +439,8 @@ int main(int argc, char ** argv) {
         const double th0 = now_ms();
         const float * lg = nullptr;
         int n_vocab = 0;
-        if (!dense.logits_n(1, &lg, &n_vocab)) { std::fprintf(stderr, "glm_generate: logits: %s\n", dense.last_error().c_str()); return 1; }
+        if (n_gen == 0 && !first_logits.empty()) { lg = first_logits.data(); n_vocab = (int) first_logits.size(); }
+        else if (!dense.logits_n(1, &lg, &n_vocab)) { std::fprintf(stderr, "glm_generate: logits: %s\n", dense.last_error().c_str()); return 1; }
         t_ph[4] += now_ms() - th0;
         if (n_gen == 0 && !a.dump_logits.empty())
             if (std::FILE * f = std::fopen(a.dump_logits.c_str(), "wb")) { std::fwrite(lg, 4, (size_t) n_vocab, f); std::fclose(f); }
@@ -312,15 +458,18 @@ int main(int argc, char ** argv) {
     const double dec_ms = now_ms() - t_dec0;
     const ds4::Ds4MoeStats st = tier.stats();
     const int dec_steps = std::max(1, n_gen - 1);
-    std::fprintf(stderr, "\nprefill: %zu tokens in %.2f s = %.2f tok/s (decode-loop prefill)\n", prompt.size(),
-                 pf_ms / 1000.0, 1000.0 * (double) prompt.size() / pf_ms);
+    std::fprintf(stderr, "\nprefill: %zu tokens in %.2f s = %.2f tok/s (%s)\n", prompt.size(),
+                 pf_ms / 1000.0, 1000.0 * (double) prompt.size() / pf_ms, a.prefill_chunk > 0 ? "chunked" : "decode-loop prefill");
+    if (a.prefill_chunk > 0)
+        std::fprintf(stderr, "prefill chunks of %d: attention+router %.0f ms, experts %.0f ms, finish %.0f ms, head/ppl %.0f ms\n",
+                     a.prefill_chunk, pc_attn, pc_exp, pc_fin, pc_head);
     std::fprintf(stderr, "decode : %d tokens, %d forward passes in %.2f s = %.2f tok/s\n", n_gen, dec_steps,
                  dec_ms / 1000.0, 1000.0 * dec_steps / dec_ms);
     const double look = (double) std::max<int64_t>(1, st.lookups());
     std::fprintf(stderr, "experts/token: hit %.1f%% (prefetched-useful %.1f/token of %.1f issued), cpu %.1f%%, pcie %.1f%%, "
-                         "file tier %lld\n", 100.0 * (double) st.hits / look, (double) st.prefetched_useful / dec_steps,
+                         "file tier %lld, skipped %.1f/token\n", 100.0 * (double) st.hits / look, (double) st.prefetched_useful / dec_steps,
                  (double) st.prefetch_issued / dec_steps, 100.0 * (double) st.cpu / look, 100.0 * (double) st.pcie / look,
-                 (long long) st.file_tier);
+                 (long long) st.file_tier, (double) st.skipped / dec_steps);
     if (a.vram_lru || st.file_tier > 0)
         std::fprintf(stderr, "tier moves: vram_lru swaps %.2f/pass (demoted %lld), arena swaps %lld, file reads %.2f ms/pass\n",
                      (double) st.vram_swaps / dec_steps, (long long) st.vram_demotes, (long long) st.arena_swaps,

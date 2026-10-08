@@ -37,3 +37,135 @@ NOT measured yet: anything on the real model.
   2x5090+2x5080), DGPP (GB10-only engine). The KDA/MLA kernels everyone uses are llama.cpp's.
 - MTP head GGUF (neuralll, 4.6 GB): depth-1 acceptance 70-75% but slower in the stock fork with 30% CPU experts; ours
   is planned Strata-fied (ARCHITECTURE.md). NOT measured here.
+
+## s3 (2026-10-08 evening): CPU build clean; the mini fixture runs the whole dense path
+- `build-glm` (CPU tree) configures and builds clean on the first try: `tools/glm/glm_dense.cpp` (881 lines) +
+  `glm_generate.cpp` compile and link with no errors, `glm_generate_cpu` runs. First compile of the phase-1 code.
+- New `tools/glm/make_mini_glm.py`: a 4-layer `glm5-next` GGUF (tiny dims, same structure as the real model) -
+  blk.0 KDA+dense, blk.1 MLA+MoE, blk.2 KDA+MoE, blk.3 MLA+MoE - so all four attention x FFN combinations are covered.
+  `glm_generate_cpu -m /tmp/mini-glm.gguf --backend cpu --experts cpu --ids 1,2,3 -n 3` loads and runs end to end (mHC,
+  KDA conv + recurrence, dense MLA, dense FFN, sigmoid router + shared expert + `Ds4MoeTier`, mean head): finite logits,
+  valid token ids, exit 0. No GPU, no real model needed.
+- `--experts cpu` note: the tier reports `arena 0.0 GiB (0 experts)` and reads experts from the GGUF per token (file
+  tier) - output is correct, but the CPU pool/arena is not populated; look at the tier's cpu-only path if CPU speed
+  ever matters.
+- `build-glm-gpu` (CUDA, arch 89, MMQ_KQUANTS) also builds clean, and `glm_generate --backend cuda --experts cpu` runs
+  the same fixture with the same token stream as the CPU backend (44 5 9 5 44) - so on this fixture the CUDA path for
+  mHC / `gated_delta_net` (KDA) / `flash_attn_ext` (MLA) / head agrees with CPU. GPU left at 8% / 0.6 GB; ComfyUI down.
+- Reference fork: a **CPU-only** build exists (`~/AI/llama.cpp-glm53/build/bin/{llama-cli,llama-perplexity,
+  llama-tokenize}`); no CUDA fork build yet (DS4 was running). Making the fixture fork-loadable surfaced two findings:
+  (1) **FIXED** - MLA layers must have `glm5-next.attention.head_count_kv` = 1, not n_head: the DSA layer writes the
+  shared latent (kv_lora), so a nonzero kv-head count sizes the kv cache `n_embd_k_gqa = head_k*head_kv` too wide
+  (llama-kv-cache.cpp:209/233) -> `ggml_set_rows` `a->ne[0]==b->ne[0]` assert via `build_dsa_layer`. The fixture now
+  writes `HEAD_COUNT_KV = [0, 1, 0, 1]` and that assert is gone. (Our engine is unaffected: `is_kda` is `head_count_kv==0`.)
+  (2) **REMAINING** - the CPU-only fork then hits `binary_op: dst f32, src0 f32, src1 f16` in the fused lightning-indexer
+  path (`cparams.fused_lid`, llama-context.cpp:249) - the fork's GLM indexer is CUDA-oriented, so a CUDA fork build (or
+  the real model) is needed. Gate plan: fork `llama-perplexity` vs our `--ppl` on the same ids.
+- Build rule learned this session: do NOT build while the `strata-ds4` session is running (compiles skew its timings).
+
+## s4 (2026-10-08 night): FIRST real-model run (GLM-5.3-Flash 3.0-bit Q4K-attn) - runs, slow cold
+- Blocker fixed: `native_expert_supported` (src/kernels/cuda/iq_kernels.cu) requires the down-proj type to be in
+  `STRATA_D_FMTS`; Q4_K (12) was missing, so GLM's Q4_K expert layers (3-5) were refused at tier init
+  ("native_expert_grouped has no kernel for layer 3's types 12/12/12"). Added `X(12)` - `Fmt<12>`, `vec_dot_q4_K_q8_1`
+  and the row-bytes `case 12` already existed, so it is a one-token, backward-compatible fix.
+- `glm_generate --backend cuda --experts gpu --slots auto --arena-gib 60 --vram-lru --ctx 2048 -n 16` (memguard 84 70):
+  45 layers (34 KDA, 11 MLA), 288 experts top-8, vocab 154880; dense half on CUDA in **1.4 s**; 1269 resident slots;
+  arena 60 GiB = 6917 experts + file tier 5179; tier load 55.9 s. Prefill (5 tok, decode-loop) 1.6 tok/s;
+  **decode 1.75 tok/s** (15 passes / 8.55 s). experts **549 ms/token** - hit **18.6%** (gpu 6%, cpu 71.8%, pcie 9.6%,
+  file-tier 2160), file reads 460 ms/pass: COLD cache, seeded in index order with **no routing profile**.
+  attention+router 14.7 ms, finish 2.7 ms, head 0.75 ms. VRAM free at the end 1.67 GiB (tight).
+- NOT a quality result: output was a degenerate repeat (token 500 x16) on arbitrary prompt ids and with **no
+  abliteration LoRA** - runtime LoRA (ARCHITECTURE Decision 5) is **not implemented**. Next: (a) routing profile
+  (`--dump-routes` -> `--profile`) to warm the expert cache, (b) implement the runtime rank-1 LoRA (Abliterix v2 as the
+  baseline), (c) a real tokenized prompt + compare vs the fork.
+
+## s5 (2026-10-08 night): abliteration adapter LOADER done + verified (NOT wired yet)
+- `tools/glm/glm_lora.hpp` (header-only) parses a rank-1 GGUF LoRA into host floats: `exps(layer,mod,expert)` for the
+  routed `ffn_{gate,up,down}_exps`, `solo(layer,mod)` for `ffn_down_shexp` / `attn_output`; `Lora1{a,b}` is one
+  `y += b*(a.x)`. Verified against `lora/gcsa-abliterix/GLM-5.3-Flash-Ablitered2-LoRA-v2.gguf`:
+  gate 26 layers a=4096 b=2048, up 26 (4096/2048), down 26 (2048/4096), down_shexp 27 (2048/4096),
+  attn_output 30 (in per layer 8192 KDA / 16384 MLA -> 4096); spot values sane; shapes match the GGUF.
+- Adapter truth (from the GGUF, corrects PLAN's older note): `alpha 1.0`, F16, 135 pairs, and it touches gate/up as
+  well as down.
+- NOT wired: no `--lora` flag; neither the `GlmDense` graph (`attn_output`, `ffn_down_shexp`) nor `Ds4MoeTier`
+  (routed exps) applies it yet. That is the next slice (see RESUME_PROMPT.md Next).
+
+## s6 (2026-10-08 late): abliteration LoRA wired into the DENSE half; cold baseline reproduced on a real prompt
+- **`--lora <adapter.gguf>` is in** (`glm_generate.cpp`); `GlmDense` applies the adapter's whole-module rank-1 pairs in
+  `build_attn`: `attn_output` on both the KDA and the MLA attention output, `ffn_down_shexp` on the shared expert's
+  SwiGLU output, each as `y += mul_mat(B, mul_mat(A, x))` (A `[in,1]`, B `[1,out]`, F32, in their own backend buffer
+  `Impl::lctx`/`lbuf`, uploaded in `init`). Without `--lora` every delta is NULL and the graph is bit-identical. Both
+  trees built clean; `glm_dense.cpp` + `glm_generate.cpp` pass `-fsyntax-only`.
+- **NOT wired: the routed experts** (`ffn_{gate,up,down}_exps`, layers 3-28) - where the adapter's abliteration mostly
+  sits. The tier's expert math has no single hook: CPU = `pool->run_split_multi_native` (ds4_moe.cpp:1123, from
+  `cpu_run` :1103), duplicated across `gpu_run`/`gpu_run_n`/`gpu_run_chunk` + the CUDA grouped/MMQ kernels. Needs new
+  kernels + a tier interface - design in RESUME_PROMPT.md. **So the model is not yet abliterated.**
+- **Real prompt, not arbitrary ids**: `bench/glm-2026-10-08/prompts/` (690-token `neutral6x`) tokenized with the HF
+  `tokenizers` lib on `bench/glm-2026-10-08/upstream/tokenizer.json`. The fork's `llama-tokenize` REFUSES on
+  `glm5-next` (`llama_init_from_model: glm5-next requires ctx_other`) - the HF lib is the working tokenizer.
+- **Cold baseline reproduced** (690-token prompt, `--dump-routes routes.bin`, 512x42x8 u16 = 344064 B): prefill
+  **1.74 tok/s**, decode **1.75 tok/s**, hit 19.0%, cpu 71.4%, pcie 9.6%, file tier 2152, file reads 461 ms/pass;
+  experts 552 ms/token of which **cpu pool 525 ms** - and 461 of that 525 is FILE READS. The tier is I/O-bound, not
+  compute-bound: the warm arena (no file reads) should cut the CPU pool toward ~65 ms and lift decode several-fold.
+- **LoRA verified ACTIVE** (bench/glm-2026-10-08/run_lora.sh, real 21-token chat prompt, same ids both runs): the
+  adapter changes generation (token 3 `29` -> `16343`) and `logits[0]` max|d| = **2.14** (mean 0.318), same argmax.
+  So the loader -> graph path works end to end. (It only moves the dense-half modules; not an abliterated model yet.)
+- **Warm cache: the routing profile BARELY helped** (`--profile routes.bin --vram-lru`): prefill 1.74 -> **1.91 tok/s**,
+  decode 1.75 -> **1.88 tok/s** (+7%), hit 19.0 -> **29.7%** - but **file reads stayed 472 ms/pass** (cold 461) and the
+  cpu pool stayed 476 ms/token. Why: the arena holds only ~55-57% of the 12096 (layer,expert) pairs (the 60 GiB
+  budget), so ordering barely matters; worse, the 512-token profile block saw only **6551 distinct** experts, so the
+  ranked arena stopped at 54 GiB instead of the 60 GiB budget. The `--dump-routes` sample (512 tokens = 1 block) is too
+  small to rank the whole table.
+- **Next speed levers (measured, not guessed)**: (a) a BIGGER arena - all ~12096 experts is ~72 GiB and would put file
+  tier at 0 (MemAvailable was 85 GiB); (b) raise `--pcie` (0.25 default -> 0.55, DS4's value) so more misses compute on
+  the GPU instead of the CPU pool; (c) lower `--pf-b` (1.43 -> ~0.7): 60 prefetch issued/token vs 22.9 useful = wasted
+  DMAs; (d) **chunked MMQ prefill** - prefill is still the 1-token decode loop (1.9 tok/s), the single biggest number
+  (DS4 392 tok/s chunked).
+
+
+## s7 (2026-10-09): routing is FLAT -> chunked prefill, exclusive byte-sized cache, REAP pruning (bench/glm-2026-10-09/)
+- **Why the cache could not help:** GLM's aux-free routing is near-uniform. Over 512 tokens the top 10% of experts per
+  layer take 18% of routes; a 1265-slot VRAM cache ranked by frequency hits 10.6% on held-out tokens (= its share of
+  experts). Locality is weak too: consecutive tokens share 0.83 of 8 experts/layer (random 0.22), a 64-token window
+  is no better than random, and a 2-token verify touches 15.2 distinct experts -> MTP ~0.9x here (memory-bound).
+  Decode speed = which fraction of the 12096 experts (107.2 GB) is resident at all, not which ones.
+- **Lossless fixes (measured):** `--arena-skip-resident` (VRAM slots no longer duplicate arena experts) + `--arena-gib
+  72`: decode 1.75 -> 3.95 tok/s. VRAM cache sized in BYTES (`slot_gib`, smallest blobs first; was a Q4_K-sized
+  count): 951 -> 1851 slots at margin 3.5 GiB.
+- **Chunked prefill** (`--prefill-chunk N [--chunk-mmq]`; GlmDense passes up to 4096 tokens: per-layer hand-off
+  tensors and router blocks are now ONE shared set, chunk graphs share one re-planning allocator, `logits_rows` reads
+  any 16 rows): 2000 tokens 1.7 -> **80-90 tok/s** (1024-token chunks, file tier present). Needs `--vram-margin 5.5`
+  at chunk 1024 + MMQ (3.5 OOMs in `m_xg`).
+- **Open gate:** chunked vs decode-loop ppl on `neutral` (115 tok): loop 20.4601 (bit-identical over 2 runs), chunked
+  19.3327 (-0.057 NLL); first-token logits max|d| 1.51, same argmax. Needs the fork oracle (or MMQ off) to say which
+  path drifts.
+- **REAP pruning** (`--saliency F` in chunked prefill: tier reads back every entry's expert output, accumulates
+  w*||f(x)||; `tools/glm/reap_prune.py`; `--prune F` masks experts out of routing AND out of arena/VRAM). Calibration
+  4 x 2000 tokens (code, prose, zh/ja, chat). Held-out 2000-token evals, chunk 1024, margin 5.5:
+
+  | config | eval_code ppl | eval_chat ppl | prefill tok/s | decode tok/s | file tier |
+  |---|---|---|---|---|---|
+  | base (no prune) | 3.676 | 5.633 | 86-90 | 3.72 | 1335 |
+  | REAP 14.2% (fit92) | **3.576** | **6.672 (+18%)** | 150 | 7.2 | 145 |
+  | random 14.2% (control) | 3.909 (+6.3%) | - | 151 | 7.0 | 145 |
+  | REAP 25% | 3.597 | - | **175** | **9.3** | 0 |
+
+  REAP's choice matters (random is 9% worse than REAP on code), and code survives even 25%. **But the chat eval
+  (mostly German README text, a language NOT in calibration) lost 18% at 14%**: a static prune list holds only for
+  calibrated domains. Next: soft pruning (penalty, not mask) + broader calibration (more languages/domains).
+- Process lesson: `pkill/pgrep -f <pattern>` matched my own shell twice (exit 144). Kill exact PIDs from a pid file.
+- **Chain 3 (2026-10-09 05:25-05:33):** broader calibration (+romance READMEs, python, json/tool-call; still NO
+  German) made the German-heavy chat eval WORSE: 7.28 (4-domain list 6.67, base 5.63). German relies on its own
+  experts that a broad non-German calibration ranks low -> pruning is domain-specific; build the prune list from the
+  mix actually used (Mal's idea: English + Chinese + code + tool calls) and keep several lists.
+- **skip_miss (decode, REAP 25% prune, fully resident, `--vram-margin 1`, decode-loop ppl over 300 eval_code
+  tokens):**
+
+  | --skip-miss | decode tok/s | ppl | skipped/token |
+  |---|---|---|---|
+  | 0 | 10.38 | 11.159 | 0 |
+  | 0.05 | 11.37 | 11.465 (+2.7%) | 31 |
+  | 0.10 | **16.38** | 11.604 (+4.0%) | 115 |
+
+  Decode 1.75 (yesterday) -> 10.4 lossless-ish (prune 25%) -> 16.4 with skip 0.10. The margin-1 VRAM cache (hit
+  35.8% vs 29% at margin 5.5) is worth ~1 tok/s: re-seeding the cache bigger after a chunked prefill is a TODO.

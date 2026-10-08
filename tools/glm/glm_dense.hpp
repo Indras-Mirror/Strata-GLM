@@ -28,6 +28,8 @@
 #include <string>
 #include <vector>
 
+namespace strata::glm { class LoraAdapter; }
+
 /// What the GGUF says about the dense half (glm5-next.* keys).
 struct GlmGeometry {
     int64_t n_layer = 0, n_embd = 0, n_head = 0, vocab = 0, n_ff = 0;
@@ -54,10 +56,14 @@ struct GlmDenseConfig {
     ggml_backend_t backend = nullptr;   ///< NULL: create and own a CPU backend
     int     n_threads = 8;
     int64_t ctx = 4096;                 ///< MLA latent-cache rows (positions) to allocate
-    int     max_tokens = 4;             ///< tokens one pass may carry (decode 1; prompt chunks up to this)
+    int     max_tokens = 4;             ///< tokens one pass may carry (decode 1; prompt chunks up to this, <= 4096)
     bool    skip_routed_experts = true; ///< the tier owns ffn_*_exps (never upload them)
     bool    gate_taps = false;          ///< keep host copies of l_out per layer (tap_l_out) for the gates
     bool    allow_long_ctx = false;     ///< past dense_attn_ctx() without the indexer (NOT the model's math)
+    /// Run-time rank-1 adapter (tools/glm/glm_lora.hpp), or NULL.  The dense half applies the adapter's whole-module
+    /// targets (`attn_output`, `ffn_down_shexp`) in the graph as y += B (A x); the routed experts' adapter entries
+    /// are Ds4MoeTier's (set separately on the tier).  The adapter must outlive the GlmDense.
+    const strata::glm::LoraAdapter * lora = nullptr;
 };
 
 class GlmDense {
@@ -85,6 +91,9 @@ public:
     bool attn_router_n(int il, int pos0, int n, int * routed_ids, float * routed_w, const float ** ffn_norm_host);
     bool finish_layer_n(int il, int n, const float * routed_sum);
     bool logits_n(int n, const float ** out, int * n_vocab);
+    /// Logits of rows [r0, r0+nr) of the last pass (nr <= 16) into out[nr * vocab]; works for any pass size (prompt
+    /// chunks: their head is never built for all n rows - 2048 x 154880 floats would not fit).
+    bool logits_rows(int r0, int nr, float * out);
     /// Selection-only bias per expert of layer il (cache-aware routing); zeros = the model's routing.
     void set_route_bias(int il, const float * bias);
     /// Forget every position (KDA state, conv state, MLA cache rows are simply overwritten from position 0 on).
