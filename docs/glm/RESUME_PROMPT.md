@@ -12,7 +12,8 @@ Worktree `~/AI/Strata-GLM`, branch **`glm`**, cut from `deepseek4` `a693545`. Sa
 worktrees; the three stay separate for now and get joined later. **Work solo** (no /conductor, workers or
 subagents). Don't push anywhere until Mal says.
 
-Read first, in this order: this file; `docs/glm/PLAN.md` (architecture, target files, reuse map, port order);
+Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port order); `docs/glm/ARCHITECTURE.md`
+(deep dive: formulas from the reference code, reuse map, memory/decode budget, decisions);
 `docs/glm/FINDINGS.md`; then the DS4 docs we build on: `docs/ds4/RESUME_PROMPT.md` (rules, gates, lessons),
 `docs/ds4/ENGINE_DENSE.md`, `docs/ds4/ENGINE_MOE.md`; `git log --oneline -15`.
 
@@ -29,10 +30,9 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (architecture, target f
 ## Next (in order)
 1. **Reference oracle** (CPU only, can start before the model lands): clone + build `neurall/llama.cpp` into
    `~/AI/llama.cpp-glm53` (CUDA, sm_89). Don't build while another session is benchmarking (ask on the relay).
-   Read its glm5next model code: it answers the open questions in PLAN.md (how the 4 mHC streams reach the head,
-   whether the DSA indexer is used, KDA gate formulas, chat template).
-2. Write the KDA math down precisely (from the fork + Kimi Linear / KDA paper) next to Strata's GDN kernels and list
-   the kernel changes (per-channel decay). Same for GLM's mHC vs DS V4's.
+   The fork is already cloned there (source read in full - ARCHITECTURE.md); only the build is left.
+   Point STRATA's ggml at a copy of DS4's `third_party/llama.cpp` (it has every op GLM needs).
+2. Answer ARCHITECTURE.md "Open questions", then the mini glm5-next fixture + `GlmDense` phase 1 (dense MLA).
 3. When the model is complete: baseline the fork on this box (decode/prompt tok/s, ppl wikitext-2 40x512, through
    memguard + GPU lock), golden dumps for the gates.
 4. Then PLAN.md "Port order" steps 2-7.

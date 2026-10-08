@@ -1,5 +1,7 @@
 # Strata-GLM: port plan for GLM-5.3-Flash
 
+Deep dive with the decisions: `docs/glm/ARCHITECTURE.md` (read it after this file).
+
 Written 2026-10-08 at branch `glm` = `deepseek4` `a693545` (no GLM code yet). Facts below come from
 `zai-org/GLM-5.3-Flash/config.json` and the target GGUF's `tensor-types-q4kattn.txt`; nothing here is measured on
 the real model yet. Re-check every architectural claim against the reference implementation before coding it.
@@ -23,8 +25,8 @@ No uncensored GSQ-RCO quant fits (GCSA-AiLab's is 137 GB), hence the runtime LoR
 - 45 layers, hidden 4096, vocab 154880, untied output, rms_norm_eps 1e-5, max positions 1M.
 - **mHC** (hyper-connections): `hc_mult 4`, `hc_sinkhorn_iters 20`, `hc_eps 1e-6`; tensors `hc_{attn,ffn}_{base,fn,scale}`
   per layer. Same family as DeepSeek V4's mHC: reuse `tools/ds4/ds4_dense.cpp` and the fused `ggml_dsv4_hc_*` ops,
-  after diffing the formulas. The tensor list shows NO `hc_head`/`output_hc` tensors: find out how GLM collapses the
-  4 streams before the head.
+  after diffing the formulas. No `hc_head` tensors: GLM collapses the 4 streams with a plain mean before
+  `output_norm` (ARCHITECTURE.md).
 - **Attention, two kinds:**
   - 34 **KDA** (Kimi Delta Attention, linear) layers = every layer except 3,7,11,...,43. 64 heads x head_dim 128,
     `short_conv_kernel_size 4` (separate q/k/v conv1d), `gate_lower_bound -5.0`. Tensors: `attn_{q,k,v,output}`
@@ -37,9 +39,9 @@ No uncensored GSQ-RCO quant fits (GCSA-AiLab's is 137 GB), hence the runtime LoR
   - 11 **DSA** (DeepSeek sparse attention, MLA) layers 3,7,...,43: `q_lora_rank 1536`, `kv_lora_rank 512`,
     qk_nope 256, **qk_rope 0** (`mla_use_nope`: no RoPE in these layers), v 256, 64 heads. Lightning indexer:
     32 heads x 128, top-2048 keys, `index_kpool 4` + compress. Tensors: `attn_q_a(+norm)`, `attn_q_b`,
-    `attn_kv_a_mqa(+norm)`, `attn_k_b`, `attn_v_b` (bf16), `attn_output`. The GGUF list shows no indexer tensors -
-    check whether the fork drops the indexer (dense attention) or stores it elsewhere. Below 2048 tokens of context the
-    top-k selects every key, so dense attention is exact there.
+    `attn_kv_a_mqa(+norm)`, `attn_k_b`, `attn_v_b` (bf16), `attn_output`, `indexer.{attn_k,attn_q_b,proj,k_norm}`,
+    `indexer_compressor_{gate,ape}` (f32, all 11 layers). Up to 2051 tokens of context the top-k selects every key,
+    so dense attention is exact there (ARCHITECTURE.md).
 - **FFN:** layers 0-2 dense (`ffn_{gate,up,down}`, 12288 wide, Q4_K). Layers 3-44 = 42 MoE layers: 288 routed experts,
   top-8, 2048 wide, sigmoid scores + `exp_probs_b` bias (noaux_tc), `norm_topk_prob`, `routed_scaling_factor 2.5`,
   1 shared expert (`*_shexp`, Q4_K), **`swiglu_limit 10`** (clamped SwiGLU, as in DS V4 - the expert kernels already
