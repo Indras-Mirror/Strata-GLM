@@ -17,7 +17,93 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
 `docs/glm/FINDINGS.md`; then the DS4 docs we build on: `docs/ds4/RESUME_PROMPT.md` (rules, gates, lessons),
 `docs/ds4/ENGINE_DENSE.md`, `docs/ds4/ENGINE_MOE.md`; `git log --oneline -15`.
 
-## State (2026-10-09 morning) - **CURRENT, read this first**
+## State (2026-10-09 LATE) - **CURRENT, read this first**
+**Serving is DONE and the model is fast. The abliteration is half-applied (mechanically working now) and its
+QUALITY is the open problem.** Public repo github.com/Indras-Mirror/Strata-GLM (remote `glm`, branch `glm`);
+last pushes `62808ddf`, `52bd0ad3`. Commit as you go; push to `glm` (Mal asks for it).
+
+**Run it now:** `~/.local/bin/strata-glm-quetza` (uncensored LoRA, port 8140, 512K ctx) / `--fast` (skip-miss 0.15)
+/ `--stock` (8141). It starts the server (~55-70 s load) then QuetzaCodetl. Verified end to end: plain chat,
+`/v1/messages` tool call, streaming + streaming tool call, 2-turn reuse, and a real harness round trip (`-p`).
+
+**Speed (FINDINGS s18).** Serving flags at 512K ctx: **decode 20.65 tok/s, prefill ~165-175 tok/s**.
+`--skip-miss 0.15` is the lever (from 9.72 at 0.05): code ppl +0.21%, chat ppl -0.97% (both inside the 1-2%
+residency noise of s14) -> it is the DEFAULT in `strata-glm-unc.json` now. Context barely matters (32K = +7%).
+
+**Serving plumbing (FINDINGS s16-s18).** `glm_generate --serve` speaks Strata's engine line protocol;
+GlmDense `snapshot()/restore()` give multi-turn reuse; `tools/glm/serve/` = tokenizer export (verified exact),
+`serve_glm.py` (Strata's server + GLM's tokenizer/template/tool calls), `glm-engine.sh` (memguard protections in
+the foreground), configs. Two traps that cost hours:
+1. **A config must NOT pass `--slots`** - Strata's server.py:490 does `int(args[index("--slots")+1])`, so a
+   `--slots auto` config dies in the SERVER (traceback in the SERVER log, engine log looks silent); the engine
+   default `slots=0` IS auto.
+2. **Multi-turn refill**: `dense.snapshot()` can FAIL (device copy) and the serve loop then left `snap_len=-1`, so
+   the "shares the last prompt" restore never fired and EVERY follow-up refilled from 0 (real traffic: 19160 then
+   19317 tokens, 0 reused, ~117 s each). It now logs every decision (`serve: reuse lcp=.. hist=.. snap=.. ->
+   reused=..`) and any snapshot failure. Verified: lcp 423 >= snap 421 -> 423 reused, 6.5 s -> 3.3 s. Any request
+   from a DIFFERENT conversation still resets the one state, so benchmarking against a live session thrashes it.
+
+**Metrics (FINDINGS s18).** `/metrics` (JSON, Monitor tab) carries live `thinking`/`output`; `/slots` is a full
+view; `?format=prometheus` (or `Accept: text/plain`) emits llama.cpp's names (`llamacpp:prompt_tokens_seconds`,
+`llamacpp:predicted_tokens_seconds`, `llamacpp:kv_cache_tokens`, `n_decode_total`, `requests_processing/deferred`)
+plus `strata:*` (prefill/decode rate, phase, expert tiers, VRAM/RAM/GPU). They live in `~/AI/Strata/serve/server.py`
+- that checkout's remote is the UPSTREAM **Niko1221/Strata**, so **do not push there**; the GLM shim imports it.
+To put them in Mal's repo, port into `Strata-GLM/serve/server.py` (a diverged copy) and repoint the shim.
+
+**Abliteration (FINDINGS s17, s19).** The adapter's 135 A/B pairs = 57 "solo" (attn_output 30, ffn_down_shexp 27,
+applied in the ggml graph) + 78 routed-expert (`ffn_{gate,up,down}_exps`, layers 3-28 x 288). Dense-only does NOT
+stop hard refusals (the keylogger prompt refuses crisply). `--lora --lora-exps` now applies the expert deltas on
+BOTH decode (`gpu_run`) and chunk (`gpu_run_chunk`) - three bugs fixed: (i) the down correction read the float `h`,
+but the default SwiGLU path writes only `hq` (fix `sw_v1 = v1 || (lora && lora->a_d)`); (ii) the chunk path
+silently did nothing (`kMaxEnt` is 32, a 1024-token chunk has 8192 entries -> dedicated `gp.c_exp`); (iii) the
+config's `--chunk-mmq` sent prefill through the UNINSTRUMENTED MMQ path -> un-ablated prefill + ablated decode =
+broken model (benign prompts looped). `--lora-exps` now forces `chunk_mmq=false` + `pcie_frac=1.0` (every miss on
+the one instrumented path; a file-tier expert is CPU-computed and would NOT be ablated - keep the set in the arena).
+Verified: code ppl 3.5628 -> 3.5967 (+0.95%), benign prompts normal, logits max|d| 1.61 vs dense-only.
+**OPEN (the real problem): the keylogger prompt LOOPS** - ~8-10k chars of reasoning, never answers, at every budget
+and through the harness (`QuetzaCodetl -p`: "exceeded the 1500 output token maximum" after 14m21s). The routed
+deltas change the refusal behaviour (dense-only refused crisply) but give a spiral, not compliance.
+
+**GETTING THE ABLATION WORKING PROPERLY (Mal's ask - treat the loop as a BUG, not "the adapter is weak")**
+The plumbing is done and numerically verified; the symptom is a deliberation loop on harmful prompts. A good
+abliteration should comply, so work it as unresolved. Cheapest first:
+1. **Sampling.** The server defaults are temperature 1.0 / top_p 0.95 with NO repetition penalty, no top_k, no min_p -
+   a looping decoder is the classic symptom. Try `repetition_penalty` ~1.05-1.15, `top_k` 40-64, `min_p` ~0.05, and a
+   lower temperature. `glm_generate`'s sampler already takes top_k/top_p/min_p; the server forwards sampling keys
+   (`sampling_keys()` in serve/server.py) - check which it passes and add what is missing.
+2. **Compare with the reference.** `~/AI/llama.cpp-glm53` is the neuralll/GLM fork (LoRA + GLM5Next). Run the SAME
+   adapter + prompt there: if the fork also loops, the adapter/method is the cause; if it complies, our application
+   is still wrong -> bisect layer ranges, gate vs up, and the `h` path.
+3. **Layer coverage.** 26 expert layers applied at once, or should the adapter target a subset (abliterations usually
+   name specific layers)? Try L15-28 only and compare text + ppl.
+4. **Swap check.** Gate and up are separate modules: confirm `A_g/B_g` are not swapped with `A_u/B_u` (that would
+   change the SwiGLU input asymmetrically). `GLM_LORA_NO_GU` / `GLM_LORA_NO_DOWN` isolate each correction.
+5. **Numerical gate for any change:** code ppl dense-only 3.5628 vs dense+exps 3.5967 (+0.95%) is the known-good
+   baseline (chunk path WITHOUT `--chunk-mmq`, which is forced for lora-exps). A large jump means the change damaged
+   the model.
+6. **Try other refusal prompts** (profanity / roast / violence-fiction / drugs) to see whether the loop is specific
+   to the keylogger prompt or general; and a much larger budget (4-8k) to see whether it ever terminates.
+
+**30+ tok/s = MTP - and the prior evidence says be careful.** `FINDINGS s7`: "a 2-token verify touches 15.2 distinct
+experts -> MTP ~0.9x here (memory-bound)". Plan: `ARCHITECTURE.md:78` (Strata-fied MTP: the block's dense part
+resident, its 288 experts through the tier, `--mtp-resident`); head at
+`/media/mal/NVME1TB/Models/GLM-5.3-Flash-RCO/mtp/GLM-5.3-Flash-MTP-Q4_K.gguf` (4.58 GB, depth-1 acceptance 70-75%).
+Strata already has `include/strata/core/{mtp,verify,coupled_draft,native_head}.hpp` + the tier's multi-token
+`gpu_run_n`. Gate with the s16 economics `(1+acceptance)/(verify+draft)` before building: 70% acceptance + a 1.8x
+verify ~= 0.94x. Cheap checks not yet run: the CURRENT decode profile (memory vs compute) at 20 tok/s, and
+`--skip-miss 0.25/0.35` (a sweep was running when this was written - see `bench/glm-2026-10-09/dec-0.25.log`,
+`dec-0.35.log`).
+
+**Traps that cost real time**
+- **Never `pgrep`/`pkill -f` a pattern that also appears in your OWN command line** - it matched this shell several
+  times (`glm_generate --serve`, `serve_glm.py`, and a bracketed pattern whose literal text sat elsewhere on the
+  same line). Use `fuser -k 8140/tcp`, or a /proc scan that skips `$$` and `$PPID`.
+- `--ppl` slows prefill a lot: measure speed WITHOUT it. Chunked ppl is only comparable at the SAME margin
+  (residency moves it 1-2%, s14).
+- GPU shared with `strata-ds4-gpu` (relay); one full-model process box-wide; `memguard.sh` takes the lock itself -
+  never wrap a chain in `flock` on it (deadlock).
+
+## State (2026-10-09 morning) - superseded by the block above
 - **First action: `relay_rename` -> `strata-glm`** (the DS4 session `strata-ds4-gpu` addresses us by that name).
 - Public repo: github.com/Indras-Mirror/Strata-GLM (remote `glm`, branch glm -> main). Mal: English + Chinese (+code)
   are what matter. GPU is SHARED with `strata-ds4-gpu` over the relay MCP: blocks <= 10 min, ask/announce, kill exact
