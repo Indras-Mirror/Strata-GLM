@@ -224,7 +224,7 @@ struct Ds4MoeConfig {
     /// STRATA_MMQ_KQUANTS for K-quants / MXFP4); otherwise, and for VRAM-resident experts, the MMVQ kernel runs.
     bool chunk_mmq = false;
     /// Prompt chunks: while layer l's experts compute (and the caller runs layer l+1's dense half), DMA layer l+1's
-    /// arena experts into the other device half, which is then sized to a whole layer.  Off with arena_adapt.
+    /// arena experts into the other device half, which is then sized to a whole layer.
     bool chunk_prestage = false;
     /// REAP saliency (calibration only): every prompt chunk reads its experts' outputs back and accumulates, per
     /// (layer, expert), sum of routing weight x ||expert output||_2 and the token count (saliency_sum / saliency_count).

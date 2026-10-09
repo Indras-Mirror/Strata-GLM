@@ -1443,6 +1443,7 @@ bool gpu_run(Ds4MoeImpl& im, int64_t layer, const int32_t* ids6, const float* w6
         if (!fi.empty()) {
             if (im.ftmp.size() < (size_t) nk * (size_t) im.blob) im.ftmp.resize((size_t) nk * (size_t) im.blob);
             if (direct && gp.s_pf) ck(cudaStreamSynchronize(gp.s_pf), "pf sync");   // no prefetch DMA reads a victim
+            if (direct && gp.s_cp) ck(cudaStreamSynchronize(gp.s_cp), "cp sync");   // nor a chunk prestage DMA
             for (size_t q = 0; q < fi.size(); ++q) {
                 fdst[q] = im.ftmp.data() + (size_t) fi[q] * (size_t) im.blob;
                 if (!direct) continue;
@@ -1857,7 +1858,7 @@ int64_t chunk_stride(Ds4MoeImpl& im, int64_t layer) {
 }
 
 // chunk_prestage: DMA `layer`'s arena experts that are not VRAM-resident, ascending ids, into device half `h` at the
-// run_chunk stride; run_chunk(layer) then only waits for c_copied[h].  The half must hold them all (else: skip).
+// run_chunk stride; run_chunk(layer) then only waits for c_copied[h].  Only the first ones that fit the half.
 void chunk_prestage(Ds4MoeImpl& im, int64_t layer, int h) {
     Gpu& gp = *im.gpu;
     gp.c_pre_layer = -1;
@@ -1868,7 +1869,8 @@ void chunk_prestage(Ds4MoeImpl& im, int64_t layer, int h) {
         if (gp.cache && !im.cfg.no_cache && gp.cache->slot_of(layer, e) >= 0) continue;
         if (gp.arena.ptr(layer, e)) es.push_back((int32_t) e);
     }
-    if (es.empty() || (int64_t) es.size() * SL > gp.c_half) return;
+    if ((int64_t) es.size() * SL > gp.c_half) es.resize((size_t) (gp.c_half / SL));   // the part that fits
+    if (es.empty()) return;
     ck(cudaStreamWaitEvent(gp.s_cp, gp.c_used[h], 0), "prestage wait used");
     for (size_t i = 0; i < es.size(); ++i)
         ck(cudaMemcpyAsync((uint8_t*) gp.c_stage[h] + i * (size_t) SL, gp.arena.ptr(layer, es[i]), (size_t) BL,
@@ -1942,9 +1944,14 @@ bool gpu_run_chunk(Ds4MoeImpl& im, int64_t layer, int n, const int32_t* ids, con
         gp.c_half = (int64_t) (mib ? std::atoll(mib) : 1024) * 1048576;
         gp.c_half = std::max<int64_t>(gp.c_half, im.blob);
         gp.c_bhalf = gp.c_half;   // the pinned bounce halves keep this size
-        // prestage: one device half holds a whole layer (every expert at the MMQ stride, <= blob + 1 MiB each)
-        if (im.cfg.chunk_prestage)
-            gp.c_half = std::max<int64_t>(gp.c_half, im.g.n_experts * (im.blob + 1048576));
+        // prestage: a device half holds up to a whole layer (every expert at the MMQ stride, <= blob + 1 MiB each),
+        // capped at STRATA_PRESTAGE_MIB (default 1536): a layer that does not fit is prestaged in part (the rest
+        // streams as without prestage) - a whole GLM layer would be 2 x 4.4 GB of VRAM
+        if (im.cfg.chunk_prestage) {
+            const char* pm = std::getenv("STRATA_PRESTAGE_MIB");
+            const int64_t cap = (int64_t) (pm ? std::atoll(pm) : 1536) * 1048576;
+            gp.c_half = std::max<int64_t>(gp.c_half, std::min<int64_t>(cap, im.g.n_experts * (im.blob + 1048576)));
+        }
         const int64_t ng = im.g.n_experts;
         ck(cudaMalloc(&gp.c_ptr, sizeof(unsigned long long) * (size_t) ng), "c_ptr");
         ck(cudaMalloc(&gp.c_start, sizeof(int32_t) * (size_t) (ng + 1)), "c_start");
@@ -2310,7 +2317,8 @@ bool gpu_run_chunk(Ds4MoeImpl& im, int64_t layer, int n, const int32_t* ids, con
 
     // ---- chunk_prestage: the next routed layer's arena experts stream in while this layer computes and the caller
     // runs the next dense half (the half this call did not use last; its kernels finish before the DMA starts) ----
-    if (im.cfg.chunk_prestage && !im.cfg.arena_adapt && gp.arena.base) {
+    // (arena_adapt is fine here: prompt chunks never swap arena slots; decode's swaps sync s_cp first, see run())
+    if (im.cfg.chunk_prestage && gp.arena.base) {
         int64_t nl = layer;
         for (int64_t k = 0; k < im.g.n_layers; ++k) {
             nl = (nl + 1) % im.g.n_layers;

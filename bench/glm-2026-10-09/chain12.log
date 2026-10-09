@@ -1,0 +1,31 @@
+### c12-rep1-code 18:09:25
+exit 0 18:10:36
+tier: gpu, 1490 resident slots, arena 63.4 GiB (7582 experts), file tier 0; load 53.8 s
+ppl: 1999 positions, mean NLL 1.28102, perplexity 3.6003
+prefill file-tier entries skipped: 41276
+prefill: 2000 tokens in 13.41 s = 149.15 tok/s (chunked)
+prefill chunks of 1024: attention+router 1017 ms, experts 9552 ms, finish 182 ms, head/ppl 2081 ms
+decode : 1 tokens, 1 forward passes in 0.00 s = 10986.96 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+### c12-rep2-code 18:10:36
+exit 0 18:11:57
+tier: gpu, 1496 resident slots, arena 63.4 GiB (7576 experts), file tier 0; load 64.5 s
+ppl: 1999 positions, mean NLL 1.28189, perplexity 3.6034
+prefill file-tier entries skipped: 41176
+prefill: 2000 tokens in 13.82 s = 144.72 tok/s (chunked)
+prefill chunks of 1024: attention+router 1041 ms, experts 9881 ms, finish 194 ms, head/ppl 2149 ms
+decode : 1 tokens, 1 forward passes in 0.00 s = 10982.13 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+### c12-rep3-code 18:11:57
+exit 0 18:12:57
+tier: gpu, 1496 resident slots, arena 63.4 GiB (7576 experts), file tier 0; load 44.1 s
+ppl: 1999 positions, mean NLL 1.28189, perplexity 3.6034
+prefill file-tier entries skipped: 41176
+prefill: 2000 tokens in 13.48 s = 148.36 tok/s (chunked)
+prefill chunks of 1024: attention+router 999 ms, experts 9596 ms, finish 180 ms, head/ppl 2111 ms
+decode : 1 tokens, 1 forward passes in 0.00 s = 11036.67 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+=== chain12 done 18:12:57

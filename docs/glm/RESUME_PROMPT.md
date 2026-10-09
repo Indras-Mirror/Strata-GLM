@@ -33,10 +33,11 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
   `--prune bench/glm-2026-10-09/prune-ezct-0.25.txt --prune-penalty 0.05 --arena-adapt --skip-file 0.15
   --skip-file-prefill 0.15 --skip-miss 0.05 --pcie 0.35` -> decode ~10.8 tok/s (hard prune 9.5), prefill 130-140, German +2% vs unpruned (hard +61%),
   code -1.7%. `--arena-admit` (heat gate) is a loss on GLM: leave off. Clean base: chat 5.547, code 3.668.
-- **Next (in order):** (1) more speed: chunk_prestage under arena_adapt (prefill), VRAM re-seed after prefill (elastic
-  ExpertCache shrink/grow), bigger chunks; gate quality with the 2000-token evals (chunked) + the decode-loop chat
+- **Next (in order):** (1) more speed: chunk 2048 = 160 tok/s prefill but needs margin ~8 -> VRAM re-seed / elastic ExpertCache
+  (shrink/grow exists, --vram-elastic) so decode keeps margin-1 slots; prestage = no gain (s14); gate quality with the 2000-token evals (chunked) + the decode-loop chat
   gate (chain10; loop vs loop only). Prompt cache across turns (DwarfStar idea, FINDINGS s13) once GLM is served.
-  (2) Fork oracle: rebuild ~/AI/llama.cpp-glm53 CPU (patched, `GLM_NO_FUSED_LID=1`) and compare indexer scoring on the
+  (2) **Numerics (s14): resident (MMVQ) vs streamed (MMQ) experts move chunked ppl 1-2%** - compare at equal
+  margin; find the off path with the fork oracle: rebuild ~/AI/llama.cpp-glm53 CPU (patched, `GLM_NO_FUSED_LID=1`) and compare indexer scoring on the
   mini fixture past 11 tokens; then the GPU chunk-vs-loop ppl gap (18.47 vs 20.46 on neutral, CPU fixture exact).
   (3) Long context deeper: prefill ~25% of 200K/500K (Mal: prove it, don't fill it) and decode at that depth; a
   gather path for decode if masked FA over the whole latent cache starts to cost (it didn't at 50K). (4) Re-seed the VRAM cache after chunked prefill (margin

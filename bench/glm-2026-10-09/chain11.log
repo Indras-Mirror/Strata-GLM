@@ -1,0 +1,50 @@
+### c11-nopre-code 18:02:59
+exit 0 18:04:23
+tier: gpu, 1362 resident slots, arena 64.4 GiB (7710 experts), file tier 0; load 65.5 s
+ppl: 1999 positions, mean NLL 1.28637, perplexity 3.6196
+prefill file-tier entries skipped: 41297
+prefill: 2000 tokens in 14.28 s = 140.09 tok/s (chunked)
+prefill chunks of 1024: attention+router 963 ms, experts 10315 ms, finish 185 ms, head/ppl 2253 ms
+decode : 1 tokens, 1 forward passes in 0.00 s = 11415.92 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+### c11-pre-code 18:04:23
+exit 0 18:05:43
+tier: gpu, 1362 resident slots, arena 64.4 GiB (7710 experts), file tier 0; load 62.6 s
+ppl: 1999 positions, mean NLL 1.28110, perplexity 3.6006
+prefill file-tier entries skipped: 41315
+prefill: 2000 tokens in 14.36 s = 139.26 tok/s (chunked)
+prefill chunks of 1024: attention+router 969 ms, experts 6751 ms, finish 3973 ms, head/ppl 2126 ms
+decode : 1 tokens, 1 forward passes in 0.00 s = 11361.44 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+### c11-pre-chat 18:05:43
+exit 0 18:06:54
+tier: gpu, 1359 resident slots, arena 64.4 GiB (7713 experts), file tier 0; load 50.8 s
+ppl: 1999 positions, mean NLL 1.75250, perplexity 5.7690
+prefill file-tier entries skipped: 48442
+prefill: 2000 tokens in 16.62 s = 120.37 tok/s (chunked)
+prefill chunks of 1024: attention+router 973 ms, experts 8763 ms, finish 4129 ms, head/ppl 2151 ms
+decode : 1 tokens, 1 forward passes in 0.00 s = 9245.05 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+### c11-hardpre-code 18:06:54
+exit 0 18:07:57
+tier: gpu, 1359 resident slots, arena 64.4 GiB (7713 experts), file tier 0; load 47.3 s
+ppl: 1999 positions, mean NLL 1.28264, perplexity 3.6061
+prefill: 2000 tokens in 12.39 s = 161.45 tok/s (chunked)
+prefill chunks of 1024: attention+router 1004 ms, experts 4745 ms, finish 3838 ms, head/ppl 2159 ms
+decode : 1 tokens, 1 forward passes in 0.00 s = 10970.08 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+### c11-pre2048-code 18:07:57
+exit 0 18:09:07
+tier: gpu, 1139 resident slots, arena 66.1 GiB (7933 experts), file tier 0; load 53.7 s
+ppl: 1999 positions, mean NLL 1.28821, perplexity 3.6263
+prefill file-tier entries skipped: 40956
+prefill: 2000 tokens in 12.48 s = 160.23 tok/s (chunked)
+prefill chunks of 2048: attention+router 1070 ms, experts 6561 ms, finish 2034 ms, head/ppl 2159 ms
+decode : 1 tokens, 1 forward passes in 0.00 s = 11320.28 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+=== chain11 done 18:09:07

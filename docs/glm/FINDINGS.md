@@ -322,3 +322,21 @@ NOT measured yet: anything on the real model.
 - **Best config now:** `--prune prune-ezct-0.25.txt --prune-penalty 0.05 --arena-adapt --skip-file 0.15
   --skip-file-prefill 0.15 --skip-miss 0.05 --pcie 0.35` -> decode ~10.8 tok/s (hard 25% 9.52; unpruned ~3.7),
   prefill 130-140 tok/s, German chunked ppl +2% vs unpruned.
+
+## s14 (2026-10-09 17:56-18:12): prefill - prestage, bigger chunks; chunked ppl depends on residency (chains 11-12)
+- `chunk_prestage` (DMA layer l+1's arena experts while layer l computes - DwarfStar's streamed-prefill idea) is now
+  allowed with arena_adapt (prompt chunks never swap arena slots; decode's direct arena reads sync s_cp first). Its
+  device half was sized to a whole layer at the largest blob (288 x 15.2 MB = 2 x 4.4 GB -> c_stage OOM even at
+  margin 8.5); now capped by `STRATA_PRESTAGE_MIB` (default 1536) and a layer that does not fit is prestaged in part.
+  **Result: no gain** (margin 6.5, soft+sfp0.15, code: 140.1 without, 139.3 with). GLM prefill is not waiting on
+  the arena DMA. Leave it off.
+- **Chunk 2048** (margin 8, + prestage): **160 tok/s** vs 140 at chunk 1024 (+14%), code ppl 3.626. Needs margin ~8
+  (chunk 2048 buffers), which costs decode VRAM slots in the same process - only worth it with a VRAM re-seed /
+  elastic cache after prefill, or for long prompts.
+- **Chunked ppl is repeatable to ~0.1%** (chain12, chain8's soft+sfp0.15 code config x3: 3.6003 / 3.6034 / 3.6034;
+  chain8: 3.6047), **but it moves 1-2% with the VRAM margin**: code 3.587 (margin 8.5) / 3.603 (5.5) / 3.620 (6.5);
+  chat 5.665 (5.5) / 5.769 (6.5, prestage); hard code 3.564 (5.5) / 3.606 (6.5). The margin only changes which
+  experts are VRAM-resident (grouped MMVQ, q8_1 activations) vs streamed (MMQ) -> **the two expert paths differ
+  numerically by ~1-2% ppl**. Same family as the open chunk-vs-loop gap (s8). Consequences: (1) compare chunked
+  ppls only at the same margin; (2) "soft prune +2% vs base" (s12) is within this path spread; the robust result
+  is soft ~= base and hard = +61% on German; (3) the fork oracle (RESUME next step) should say which path is right.
