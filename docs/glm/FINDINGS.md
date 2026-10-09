@@ -462,3 +462,26 @@ Strata's server talks to its engine over a line protocol, so GLM now speaks it.
   routing index, so `ids6[dst[i]]` is right) nor the A/B shapes (gate/up 4096->2048, down 2048->4096, matching the
   tier's n_embd 4096 / n_ff 2048) - re-test with the current binary.  The CPU pool and the MMQ chunk path are still
   uninstrumented (all-or-nothing: a large share of experts are computed there).
+
+## s19 (2026-10-09 late): routed-expert LoRA WORKS (all paths, consistent); the refusal prompt loops
+- **Three bugs found and fixed in `--lora-exps`, in order:**
+  1. **NaN**: the down correction read the float `h` buffer, but the default SwiGLU path (`sw_v1=false`) writes
+     only `hq` (quantized) - `h` was garbage.  Fix: `sw_v1 = v1 || (lora && lora->a_d)` materialises `h`.
+     (Bisected with GLM_LORA_NO_GU / GLM_LORA_NO_DOWN: GU-off still NaN, DOWN-off clean.)
+  2. **The chunk path silently did nothing**: `kMaxEnt` is only 32 (kMaxTok 4), so a 1024-token chunk's 8192
+     entries failed my `NE <= kMaxEnt` guard.  Fix: a dedicated `gp.c_exp` sized to the chunk's `ne`.
+  3. **Prefill/decode mismatch (the model-breaking one)**: the config's `--chunk-mmq` sends prefill chunks through
+     the MMQ path, which is NOT instrumented -> un-ablated prefill + ablated decode = a broken model (benign
+     prompts looped: "write one sentence about the ocean" produced nothing, "2+2" still worked).  Fix: `--lora-exps`
+     forces `chunk_mmq = false` (and `pcie_frac = 1.0` so every miss takes the one instrumented path).
+- **Now mechanically correct**, verified: code ppl dense 3.5628 -> dense+exps **3.5967 (+0.95%)** (chunk and decode
+  consistent); benign prompts answer normally ("2+2" -> "4"; ocean -> a real sentence); the expert deltas move the
+  first-token logits (max|d| 1.61 vs dense-only).
+- **But the hard-refusal prompt does not comply - it loops.** The keylogger prompt (effort=low) runs ~8-10k chars of
+  reasoning and never answers, at every budget tried (500/1800/2200) and through the real harness (QuetzaCodetl -p
+  reports "exceeded the 1500 output token maximum" after 14m21s).  Different from the dense-only model, which
+  refused crisply.  So the routed deltas DO change the refusal behaviour, but the result is a deliberation spiral,
+  not compliance - an ablation-quality question, not a plumbing one.  Unverified: whether other refusal prompts
+  comply, and whether a bigger budget eventually terminates.
+- **Cost of the ablated mode**: `--chunk-mmq` off drops prefill (220 -> ~130 tok/s); `pcie 1.0` + the whole set in
+  the arena are required (a file-tier expert is computed by the CPU pool and would not be ablated).

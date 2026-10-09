@@ -155,7 +155,7 @@ struct Gpu {
     std::vector<int32_t> c_pre_e;
     void *c_w = nullptr, *c_out = nullptr;   ///< run_chunk: the top-k weights and the summed rows on the card
     void *c_x = nullptr, *c_xq = nullptr, *c_parts = nullptr, *c_scratch = nullptr, *c_ptr = nullptr,
-         *c_start = nullptr, *c_ng = nullptr, *c_dst = nullptr, *c_tokv = nullptr, *c_stage[2] = {};
+         *c_start = nullptr, *c_ng = nullptr, *c_dst = nullptr, *c_tokv = nullptr, *c_exp = nullptr, *c_stage[2] = {};
     uint8_t* c_bounce[2] = {};
     float* c_hparts = nullptr;
     cudaStream_t s_cp = nullptr;
@@ -195,7 +195,7 @@ struct Gpu {
         if (h_dummy) cudaFreeHost(h_dummy);
         if (h_x) cudaFreeHost(h_x);
         if (h_parts) cudaFreeHost(h_parts);
-        for (void* p : {c_x, c_xq, c_parts, c_scratch, c_ptr, c_start, c_ng, c_dst, c_tokv, c_stage[0], c_stage[1], c_w, c_out})
+        for (void* p : {c_x, c_xq, c_parts, c_scratch, c_ptr, c_start, c_ng, c_dst, c_tokv, c_exp, c_stage[0], c_stage[1], c_w, c_out})
             if (p) cudaFree(p);
         for (uint8_t* p : c_bounce)
             if (p) cudaFreeHost(p);
@@ -1988,7 +1988,7 @@ bool gpu_run_chunk(Ds4MoeImpl& im, int64_t layer, int n, const int32_t* ids, con
     Ds4MoeStats st;
 
     if (n > gp.c_tok) {   // (re)allocate for n tokens
-        for (void* p : {gp.c_x, gp.c_xq, gp.c_parts, gp.c_scratch, gp.c_dst, gp.c_tokv, gp.c_w, gp.c_out}) if (p) cudaFree(p);
+        for (void* p : {gp.c_x, gp.c_xq, gp.c_parts, gp.c_scratch, gp.c_dst, gp.c_tokv, gp.c_exp, gp.c_w, gp.c_out}) if (p) cudaFree(p);
         if (gp.c_hparts) cudaFreeHost(gp.c_hparts);
         gp.c_tok = n;
         const int64_t ne = (int64_t) n * K;
@@ -1998,6 +1998,7 @@ bool gpu_run_chunk(Ds4MoeImpl& im, int64_t layer, int n, const int32_t* ids, con
         ck(cudaMalloc(&gp.c_scratch, strata::kernels::native_expert_scratch_bytes(ne, im.g.n_ff)), "c_scratch");
         ck(cudaMalloc(&gp.c_dst, sizeof(int32_t) * (size_t) ne), "c_dst");
         ck(cudaMalloc(&gp.c_tokv, sizeof(int32_t) * (size_t) ne), "c_tok");
+        ck(cudaMalloc(&gp.c_exp, sizeof(int32_t) * (size_t) ne), "c_exp");   // per-entry expert id (routed LoRA)
         ck(cudaMalloc(&gp.c_w, sizeof(float) * (size_t) ne), "c_w");
         ck(cudaMalloc(&gp.c_out, (size_t) n * (size_t) H * 4), "c_out");
         ck(cudaMallocHost((void**) &gp.c_hparts, (size_t) n * (size_t) H * 4), "c_hparts");   // the summed rows
@@ -2107,8 +2108,7 @@ bool gpu_run_chunk(Ds4MoeImpl& im, int64_t layer, int n, const int32_t* ids, con
             }
     }
     std::vector<int32_t> dst((size_t) NE), tok((size_t) NE), fill(first.begin(), first.end() - 1);
-    const bool lora_on = layer < (int64_t) gp.lora.size() && gp.lora[(size_t) layer].a_g != nullptr &&
-                         NE <= (int64_t) kMaxEnt;   // d_ent_exp capacity
+    const bool lora_on = layer < (int64_t) gp.lora.size() && gp.lora[(size_t) layer].a_g != nullptr && gp.c_exp;
     std::vector<int32_t> exp;
     if (lora_on) exp.resize((size_t) NE);
     for (int64_t j = 0; j < NE; ++j) {
@@ -2121,7 +2121,7 @@ bool gpu_run_chunk(Ds4MoeImpl& im, int64_t layer, int n, const int32_t* ids, con
     ck(cudaMemcpyAsync(gp.c_dst, dst.data(), sizeof(int32_t) * (size_t) NE, cudaMemcpyHostToDevice, gp.s), "c_dst");
     ck(cudaMemcpyAsync(gp.c_tokv, tok.data(), sizeof(int32_t) * (size_t) NE, cudaMemcpyHostToDevice, gp.s), "c_tok");
     if (lora_on)   // routed-expert LoRA: the expert of each (sorted) entry, for the correction kernels
-        ck(cudaMemcpyAsync(gp.d_ent_exp, exp.data(), sizeof(int32_t) * (size_t) NE, cudaMemcpyHostToDevice, gp.s), "c_exp");
+        ck(cudaMemcpyAsync(gp.c_exp, exp.data(), sizeof(int32_t) * (size_t) NE, cudaMemcpyHostToDevice, gp.s), "c_exp");
 
     // ---- activations ----
     ck(cudaMemcpyAsync(gp.c_x, x_host, (size_t) n * (size_t) H * 4, cudaMemcpyHostToDevice, gp.s), "c_x h2d");
@@ -2232,6 +2232,7 @@ bool gpu_run_chunk(Ds4MoeImpl& im, int64_t layer, int n, const int32_t* ids, con
         const strata::kernels::NativeExpertLora* plo = nullptr;
         if (lora_on) {
             lo = gp.lora[(size_t) layer];
+            lo.ent_exp = (const int32_t*) gp.c_exp;   // the chunk's own per-entry expert ids
             lo.x = (const float*) gp.c_x;
             lo.x_stride = (int64_t) H;
             lo.ent_lo = lstart.front();
@@ -2530,7 +2531,7 @@ void Ds4MoeTier::release_chunk() {
     if (gp.s) cudaStreamSynchronize(gp.s);
     if (gp.s_cp) cudaStreamSynchronize(gp.s_cp);
     for (void* p : {gp.c_x, gp.c_xq, gp.c_parts, gp.c_scratch, gp.c_ptr, gp.c_start, gp.c_ng, gp.c_dst, gp.c_tokv,
-                    gp.c_stage[0], gp.c_stage[1], gp.c_w, gp.c_out})
+                    gp.c_exp, gp.c_stage[0], gp.c_stage[1], gp.c_w, gp.c_out})
         if (p) cudaFree(p);
     for (uint8_t* p : gp.c_bounce)
         if (p) cudaFreeHost(p);
@@ -2540,7 +2541,7 @@ void Ds4MoeTier::release_chunk() {
         if (gp.c_used[i]) cudaEventDestroy(gp.c_used[i]);
     }
     if (gp.s_cp) cudaStreamDestroy(gp.s_cp);
-    gp.c_x = gp.c_xq = gp.c_parts = gp.c_scratch = gp.c_ptr = gp.c_start = gp.c_ng = gp.c_dst = gp.c_tokv = nullptr;
+    gp.c_x = gp.c_xq = gp.c_parts = gp.c_scratch = gp.c_ptr = gp.c_start = gp.c_ng = gp.c_dst = gp.c_tokv = gp.c_exp = nullptr;
     gp.c_w = gp.c_out = nullptr;
     gp.c_stage[0] = gp.c_stage[1] = nullptr;
     gp.c_bounce[0] = gp.c_bounce[1] = nullptr;

@@ -2805,7 +2805,8 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     }
 #endif
     check("native_expert_grouped/gu");
-    if (lora && lora->a_g && g_exp_phase != 2 && lora->ent_lo < lora->ent_hi) {   // before SwiGLU (its input)
+    if (lora && lora->a_g && g_exp_phase != 2 && lora->ent_lo < lora->ent_hi &&
+        std::getenv("GLM_LORA_NO_GU") == nullptr) {   // before SwiGLU (its input)
         lora_gu_kernel<<<(unsigned) (lora->ent_hi - lora->ent_lo), 256, 0, s>>>(
             lora->ent_exp, ent_tok, lora->a_g, lora->b_g, lora->a_u, lora->b_u, lora->x, lora->x_stride,
             L.n_embd, L.n_ff, lora->n_experts, (int32_t) lora->ent_lo, (int32_t) lora->ent_hi, gate, up);
@@ -2818,7 +2819,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     static const bool sw_fused = env_on("STRATA_HIP_SWIGLU_FUSED");
     const bool sw_v1 = v1 || !sw_fused;
 #else
-    const bool sw_v1 = v1;
+    const bool sw_v1 = v1 || (lora && lora->a_d != nullptr);   // the down LoRA reads the float `h`
 #endif
     if (sw_v1) {
         swiglu_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, nh, L.swiglu_limit);
@@ -2863,7 +2864,8 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
         default: std::fprintf(stderr, "native_expert_grouped: down type %d\n", L.d_type); std::exit(1);
     }
     check("native_expert_grouped/down");
-    if (lora && lora->a_d && lora->ent_lo < lora->ent_hi) {   // after the down kernel wrote `out`
+    if (lora && lora->a_d && lora->ent_lo < lora->ent_hi &&
+        std::getenv("GLM_LORA_NO_DOWN") == nullptr) {   // after the down kernel wrote `out`
         lora_down_kernel<<<(unsigned) (lora->ent_hi - lora->ent_lo), 256, 0, s>>>(
             lora->ent_exp, ent_dst, lora->a_d, lora->b_d, h, L.n_ff, L.n_embd, lora->n_experts,
             (int32_t) lora->ent_lo, (int32_t) lora->ent_hi, out);

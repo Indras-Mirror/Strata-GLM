@@ -309,6 +309,17 @@ int main(int argc, char ** argv) {
     if (a.arena_admit > 0.0f) mc.arena_adapt = true;
     mc.skip_miss = a.skip_miss;   // decode: drop a VRAM-miss expert weighing < skip_miss x the token's weight sum
     mc.lora = lora_host.empty() ? nullptr : lora_host.data();   // routed-expert deltas (--lora-exps)
+    if (a.lora_exps) {
+        mc.pcie_frac = 1.0;   // the deltas apply on the GPU grouped path only: every miss goes there
+        if (mc.chunk_mmq) {   // MMQ chunks are NOT instrumented: un-ablated prefill + ablated decode = a broken model
+            mc.chunk_mmq = false;
+            std::fprintf(stderr, "lora-exps: --chunk-mmq off (the MMQ chunk path does not apply the deltas; a "
+                                 "chunk and a decode must be ablated the same or the model is inconsistent)\n");
+        }
+        std::fprintf(stderr, "lora-exps: pcie_frac -> 1.0 (the routed-expert deltas are applied by the GPU grouped "
+                             "path; a file-tier expert is computed by the CPU pool and would NOT be ablated - keep "
+                             "the whole routed set in the arena, e.g. --prune + --arena-gib 72)\n");
+    }
     if (mc.saliency && a.prefill_chunk <= 0) { std::fprintf(stderr, "glm_generate: --saliency needs --prefill-chunk\n"); return 2; }
     // --prune FILE: "layer expert" lines; those experts are never routed (selection bias -1e30, REAP-style pruning)
     // and never take arena/VRAM space, so a pruned set that fits RAM+VRAM never touches the file tier.
