@@ -1888,6 +1888,35 @@ bool gpu_run_chunk(Ds4MoeImpl& im, int64_t layer, int n, const int32_t* ids, con
     bool in_resident = true;
     std::vector<char> kev_res;
     const int64_t H = im.g.n_embd, K = im.g.top_k, NE = (int64_t) n * K;
+    // skip_file_chunk: a low-weight entry of an expert that only the file tier holds is redirected to its token's
+    // heaviest expert with weight 0 (contributes nothing); an expert left without entries is never read
+    std::vector<int32_t> ids_s;
+    std::vector<float> w_s;
+    if (im.cfg.skip_file_chunk > 0.0f && gp.arena.base && !gp.arena.slot_of.empty()) {
+        ids_s.assign(ids, ids + NE);
+        w_s.assign(w, w + NE);
+        for (int64_t t = 0; t < n; ++t) {
+            double ws = 0;
+            int64_t top = 0;
+            for (int64_t k = 0; k < K; ++k) {
+                ws += (double) w[t * K + k];
+                if (w[t * K + k] > w[t * K + top]) top = k;
+            }
+            for (int64_t k = 0; k < K; ++k) {
+                const int64_t jj = t * K + k;
+                const int32_t e = ids[jj];
+                if (k == top || e < 0 || e >= im.g.n_experts) continue;
+                if (gp.arena.ptr(layer, e)) continue;
+                if (gp.cache && !im.cfg.no_cache && gp.cache->slot_of(layer, e) >= 0) continue;
+                if ((double) w[jj] >= (double) im.cfg.skip_file_chunk * ws) continue;
+                ids_s[(size_t) jj] = ids[t * K + top];
+                w_s[(size_t) jj] = 0.0f;
+                ++im.st.skipped_file;
+            }
+        }
+        ids = ids_s.data();
+        w = w_s.data();
+    }
     const int64_t BL = im.bl[(size_t) layer];
     const strata::kernels::NativeExpertLayout& GL = gp.gll[(size_t) layer];
     const double t0 = now_ms();

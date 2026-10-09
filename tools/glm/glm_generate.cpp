@@ -41,7 +41,7 @@ struct Args {
     double vram_margin_gib = 1.0, pcie = 0.25, pf_b = 1.43, arena_gib = 60.0;
     int threads = 0;
     int64_t ctx = 0;
-    float temp = 0.0f, route_bias = 0.0f, prune_penalty = 0.0f, skip_miss = 0.0f, skip_file = 0.0f, arena_admit = 0.0f;
+    float temp = 0.0f, route_bias = 0.0f, prune_penalty = 0.0f, skip_miss = 0.0f, skip_file = 0.0f, skip_file_chunk = 0.0f, arena_admit = 0.0f;
     uint64_t seed = 1;
     std::vector<int> stop;
     bool ppl = false, vram_lru = false, arena_adapt = false, arena_skip = false;
@@ -98,6 +98,7 @@ bool parse(int argc, char ** argv, Args & a) {
         else if (k == "--prune") a.prune = next();
         else if (k == "--skip-miss") a.skip_miss = (float) std::atof(next().c_str());
         else if (k == "--skip-file") a.skip_file = (float) std::atof(next().c_str());
+        else if (k == "--skip-file-prefill") a.skip_file_chunk = (float) std::atof(next().c_str());
         else if (k == "--arena-admit") a.arena_admit = (float) std::atof(next().c_str());
         else if (k == "--prune-penalty") a.prune_penalty = (float) std::atof(next().c_str());
         else { std::fprintf(stderr, "glm_generate: unknown argument %s\n", k.c_str()); return false; }
@@ -133,7 +134,7 @@ int main(int argc, char ** argv) {
                              "       [--route-bias X] [--ctx N] [--temp 0] [--stop id,id] [--ppl] [--dump-logits f] [--dump-routes f]\n"
                              "       [--lora adapter.gguf] [--prefill-chunk N [--chunk-mmq] [--chunk-prestage]] [--allow-long-ctx]\n"
                              "       [--prune f [--prune-penalty X]] [--arena-adapt [--arena-admit HALF_LIFE_TOKENS]]\n"
-                             "       [--skip-miss T] [--skip-file T]\n");
+                             "       [--skip-miss T] [--skip-file T] [--skip-file-prefill T]\n");
         return 2;
     }
     std::vector<int> prompt = a.ids_csv.empty() ? std::vector<int>() : parse_csv(a.ids_csv);
@@ -210,6 +211,7 @@ int main(int argc, char ** argv) {
     mc.chunk_mmq = a.chunk_mmq;
     mc.chunk_prestage = a.chunk_prestage;
     mc.saliency = !a.saliency.empty();
+    mc.skip_file_chunk = a.skip_file_chunk;   // prefill chunks: same rule
     mc.skip_file = a.skip_file;   // decode: same, only for experts the arena does not hold (file tier)
     mc.arena_admit = a.arena_admit;   // arena_adapt gate: heat half-life in tokens (0 = promote on first read)
     if (a.arena_admit > 0.0f) mc.arena_adapt = true;
@@ -444,6 +446,8 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "ppl: %d positions, mean NLL %.5f, perplexity %.4f\n", n_scored, nll / n_scored, std::exp(nll / n_scored));
     const double pf_ms = now_ms() - t_pf0;
 
+    if (a.skip_file_chunk > 0.0f)
+        std::fprintf(stderr, "prefill file-tier entries skipped: %lld\n", (long long) tier.stats().skipped_file);
     // ---- decode
     tier.reset_stats();
     int pos = (int) prompt.size(), n_gen = 0;

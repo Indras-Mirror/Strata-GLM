@@ -1,0 +1,37 @@
+### c8-sfp0.15-chat 17:32:35
+exit 0 17:33:55
+tier: gpu, 1482 resident slots, arena 63.5 GiB (7590 experts), file tier 0; load 62.2 s
+ppl: 1999 positions, mean NLL 1.73432, perplexity 5.6651
+prefill file-tier entries skipped: 47985
+prefill: 2000 tokens in 15.34 s = 130.34 tok/s (chunked)
+decode : 1 tokens, 1 forward passes in 0.00 s = 9408.84 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+### c8-sfp0.15-code 17:33:55
+exit 0 17:35:05
+tier: gpu, 1482 resident slots, arena 63.5 GiB (7590 experts), file tier 0; load 52.2 s
+ppl: 1999 positions, mean NLL 1.28224, perplexity 3.6047
+prefill file-tier entries skipped: 41420
+prefill: 2000 tokens in 14.28 s = 140.05 tok/s (chunked)
+decode : 1 tokens, 1 forward passes in 0.00 s = 9269.22 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+### c8-sfp0.20-chat 17:35:05
+exit 0 17:36:05
+tier: gpu, 1482 resident slots, arena 63.5 GiB (7590 experts), file tier 0; load 43.9 s
+ppl: 1999 positions, mean NLL 1.76815, perplexity 5.8600
+prefill file-tier entries skipped: 53987
+prefill: 2000 tokens in 14.01 s = 142.79 tok/s (chunked)
+decode : 1 tokens, 1 forward passes in 0.00 s = 9266.55 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+### c8-sfp0.20-code 17:36:05
+exit 0 17:37:06
+tier: gpu, 1482 resident slots, arena 63.5 GiB (7590 experts), file tier 0; load 46.0 s
+ppl: 1999 positions, mean NLL 1.28783, perplexity 3.6249
+prefill file-tier entries skipped: 42292
+prefill: 2000 tokens in 12.74 s = 156.99 tok/s (chunked)
+decode : 1 tokens, 1 forward passes in 0.00 s = 9282.90 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+=== chain8 done 17:37:06

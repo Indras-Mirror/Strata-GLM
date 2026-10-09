@@ -235,6 +235,9 @@ struct Ds4MoeConfig {
     /// Decode (run): like skip_miss, but only for experts the arena does not hold (the NVMe file tier, e.g. soft-pruned
     /// experts): dropped if they weigh < `skip_file` x the token's weight sum.  The larger of the two applies.  0 = off.
     float skip_file = 0.0f;
+    /// Prompt chunks (run_chunk): the same rule for prefill - a file-tier entry below `skip_file_chunk` x its token's
+    /// weight sum is computed by the token's heaviest expert with weight 0 instead (never read).  0 = off.
+    float skip_file_chunk = 0.0f;
     /// Decode (MiMo and DS4): a PCIe-share miss (and a prefetched expert the routing used) takes
     /// the least-recently-used VRAM slot of its layer instead of a staging buffer, so the cache follows the
     /// conversation (route_probe sim, 1800 slots: static 40.5% held-out hit, LRU 61.6%; FINDINGS s16).  Same math per

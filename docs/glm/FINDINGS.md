@@ -263,3 +263,38 @@ NOT measured yet: anything on the real model.
 - Remaining gap to hard: ~21 ms/pass of file reads + a slightly busier CPU pool. Next: skip-file 0.15/0.20, penalty
   0.10 (fewer soft-pruned wins), and skip-file + skip-miss 0.05 to buy back speed elsewhere; chunked prefill
   (161 -> ~100 tok/s under soft prune) has no skip yet; run_chunk is the place to add it.
+
+## s12 (2026-10-09 17:25-17:37): soft prune at hard-prune speed - skip-file sweep (chain7) + prefill skip (chain8)
+- New: `--skip-file-prefill T` (Ds4MoeConfig::skip_file_chunk): in a prompt chunk, a file-tier entry below T x its
+  token's weight sum is redirected to the token's heaviest expert with weight 0 (contributes nothing; an expert left
+  without entries is never read). Kernels untouched.
+- **Decode** (chain7; eval_code300, 64 tokens timed, margin 1, ezct 25% list, soft = penalty 0.05 + adapt):
+
+  | config | decode tok/s | file ms/pass | file-tier skipped |
+  |---|---|---|---|
+  | hard 25% (s11) | 9.52 | 0 | - |
+  | hard 25% + skip-miss 0.05 | 10.77 | 0 | - |
+  | soft + skip-file 0.10 (s11) | 8.46 | 21.3 | 494 |
+  | **soft + skip-file 0.15** | **9.82** | 7.9 | 1023 |
+  | soft + skip-file 0.20 | 10.10 | 4.1 | 1087 |
+  | soft penalty 0.10 + skip-file 0.10 | 8.89 | 17.1 | 224 |
+  | soft + skip-file 0.10 + skip-miss 0.05 | 8.91 | 21.6 | 568 |
+
+  The 299-token decode-loop ppls (10.9-11.8) swing ~7% run to run: too small to rank quality. Quality is judged
+  at full size below.
+- **Quality at full size + prefill** (chain8; 2000-token held-out evals, chunk 1024, soft 0.05 + adapt; the prefill
+  skip applies the same rule, so it is also the quality proxy for decode skip-file):
+
+  | config | eval_chat (German) | eval_code | prefill tok/s (chat / code) |
+  |---|---|---|---|
+  | base, no prune (s11) | 5.547 | 3.668 | ~88 |
+  | hard 25% | 8.949 (+61%) | 3.564 (-2.8%) | 161 (code) |
+  | soft, no skip (s10) | 5.516 (-0.6%) | 3.583 (-2.3%) | 97 / 102 |
+  | **soft + skip-file-prefill 0.15** | **5.665 (+2.1%)** | **3.605 (-1.7%)** | **130 / 140** |
+  | soft + skip-file-prefill 0.20 | 5.860 (+5.6%) | 3.625 (-1.2%) | 143 / 157 |
+
+- **Recommended config:** `--prune prune-ezct-0.25.txt --prune-penalty 0.05 --arena-adapt --skip-file 0.15
+  --skip-file-prefill 0.15` -> decode ~9.8 tok/s (= hard prune), prefill 130-140 (hard 161), German +2% vs
+  unpruned instead of +61%, code still better than unpruned. 0.20 buys ~10% more prefill speed for another
+  +3.5% on German. To win back the rest: skip-miss on VRAM misses (hard + 0.05 -> 10.77), bigger chunks, VRAM
+  re-seed after prefill.
