@@ -29,11 +29,15 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
   --skip-miss 0.10, +4% ppl). Hard prune hurts uncalibrated languages (German -18..-29%).
 - **Long context WORKS (FINDINGS s9):** `--ctx 524288` allocates (~6 GB latent cache, 734 VRAM slots left at margin
   5.5); 50K-token prefill **229.6 tok/s**; decode at 50K depth **8.23 tok/s** (vs ~8.5 at 2K).
-- **IN PROGRESS (FINDINGS s16): serving + Quetza wrapper `~/.local/bin/strata-glm-quetza`.** Engine `glm_generate
-  --serve` + GlmDense snapshot/restore + tools/glm/serve/ (tokenizer verified exact, Strata server shim, configs,
-  foreground memguard launcher). First start died silently after the LoRA line - debug that first (run
-  `tools/glm/serve/glm-engine.sh --serve $(args of strata-glm-unc.json) < /dev/null`, check exit code / VRAM at ctx
-  524288), then test /v1/messages + tool call + 2-turn reuse. Then the same for DS4 (coordinate with strata-ds4-gpu).
+- **DONE (FINDINGS s16): serving + Quetza wrapper `~/.local/bin/strata-glm-quetza`.** Engine `glm_generate --serve`
+  + GlmDense snapshot/restore + tools/glm/serve/ (tokenizer verified exact, Strata server shim, configs, foreground
+  memguard launcher). The "silent" first start was Strata's server doing `int(args[args.index("--slots")+1])` on our
+  `--slots auto`: **drop `--slots` from the configs** (engine default `slots=0` = auto). Verified end to end at ctx
+  524288: plain chat, `/v1/messages` tool call, 2-turn reuse (`31 reused`), streaming + streaming tool call; decode
+  ~8-9 tok/s. Wrapper starts the server (uncensored LoRA 8140 / stock 8141) then Quetza. Not yet run as a full
+  Quetza session. Open: serve-mode `--vram-grow` shrink-before-prefill.
+- **NEXT: the same for DS4** (`ds4_generate --serve` in `~/AI/Strata-DS4`, the strata-ds4-gpu session's tree - do not
+  edit it) + a wrapper; coordinate with strata-ds4-gpu over the relay.
 - **Best real-use config (FINDINGS s15):** `--prune bench/glm-2026-10-09/prune-ezct-0.25.txt --prune-penalty 0.05
   --arena-adapt --skip-file 0.15 --skip-file-prefill 0.15 --skip-miss 0.05 --pcie 0.35 --prefill-chunk 2048
   --chunk-mmq --vram-margin 8 --vram-grow 1 --arena-skip-resident --arena-gib 72 --slots auto` -> prefill ~220-230,

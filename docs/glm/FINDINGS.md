@@ -391,8 +391,19 @@ Strata's server talks to its engine over a line protocol, so GLM now speaks it.
   dense half only; port 8140) / `strata-glm.json` (stock, 8141): soft prune best config, ctx 524288, chunk 1024,
   margin 5.5, sampling temperature 1.0 / top_p 0.95.
 - **Wrapper:** `~/.local/bin/strata-glm-quetza [--stock] [--port=N]` (same shape as strata-quetza).
-- **Status / open:** first server start died silently right after the LoRA line (no error in the engine log, server
-  exited). Standalone `glm-engine.sh --serve <args> < /dev/null` was being run to get the exit code (suspects: VRAM
-  at ctx 524288 + chunk 1024 + LoRA, systemd scope, or the stdin reader). Next: find that, then curl
-  /v1/messages (plain + a tool call + a 2-turn reuse check), then Quetza. Same work for DS4 (`ds4_generate --serve`)
-  was asked by Mal; strata-ds4-gpu was asked over the relay whether it builds it in Strata-DS4.
+- **Status: WORKING end to end (verified 2026-10-09 ~18:5x).** The "first start died silently" was NOT the engine:
+  the engine reached `READY` in 62 s (738 resident slots at ctx 524288). Strata's `serve/server.py:490` does
+  `asked = next((int(args[args.index(k) + 1]) for k in ("--batch", "--slots") if k in args), 0)` and our config
+  passed `--slots auto` -> `ValueError: invalid literal for int() with base 10: 'auto'` in the SERVER. Its traceback
+  is in the SERVER log, not the engine log - which is why it looked silent. **Fix: drop `--slots` from the configs**
+  (`glm_generate`'s default `slots=0` IS auto - tools/glm/glm_generate.cpp:47,82). No engine change needed.
+- **Verified through the API** (server on 8140; `/health` ok, max_context 524288): plain `/v1/chat/completions`
+  (finish_reason stop, content "4"); `/v1/messages` tool call -> clean `tool_use` `{"city":"Melbourne"}` with
+  stop_reason tool_use; 2-turn reuse -> engine log `46 tokens (31 reused)`, API `cache_n 31`; streaming SSE (text)
+  and a streaming tool call (`input_json_delta` accumulates the JSON, stop_reason tool_use). Decode **~8-9 tok/s** at
+  512K ctx (738 slots - the 512K latent cache costs slots vs the 10.8 of s11-s13).
+- **Still open:** `--serve` forces `--vram-grow` off (every request's chunked prefill needs the chunk VRAM); TODO
+  shrink-before-prefill to keep the grow. Wrapper `~/.local/bin/strata-glm-quetza` (uncensored LoRA on 8140 / stock
+  on 8141) is written and its endpoint verified by curl, but NOT yet launched as a full Quetza session.
+- **DS4:** `ds4_generate --serve` does NOT exist yet in `~/AI/Strata-DS4` (grepped 2026-10-09 18:5x); that tree is
+  the `strata-ds4-gpu` session's - do not edit it. Relay ask pending (no peer connected at 18:5x).

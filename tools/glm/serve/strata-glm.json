@@ -7,8 +7,6 @@
   "cuda",
   "--experts",
   "gpu",
-  "--slots",
-  "auto",
   "--arena-gib",
   "72",
   "--arena-skip-resident",
