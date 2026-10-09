@@ -26,12 +26,14 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
   indexer (long context; 524K allocates), shared-allocator stale-pointer fix, FA mask-stride fix.
 - Numbers (REAP 25%, fully resident): prefill 156-175 tok/s (chunk 1024), decode 8.5-10.4 tok/s (16.4 with
   --skip-miss 0.10, +4% ppl). Hard prune hurts uncalibrated languages (German -18..-29%).
+- **Long context WORKS (FINDINGS s9):** `--ctx 524288` allocates (~6 GB latent cache, 734 VRAM slots left at margin
+  5.5); 50K-token prefill **229.6 tok/s**; decode at 50K depth **8.23 tok/s** (vs ~8.5 at 2K).
 - **Next (in order):** (1) port DS4's soft prune: `--prune-penalty 0.5 --arena-adapt` with an en+zh+code+tools
   calibration list (cal_code, cal_prose, cal_multi, cal_chat, cal_python, cal_json); eval code/chat/German.
   (2) Fork oracle: rebuild ~/AI/llama.cpp-glm53 CPU (patched, `GLM_NO_FUSED_LID=1`) and compare indexer scoring on the
   mini fixture past 11 tokens; then the GPU chunk-vs-loop ppl gap (18.47 vs 20.46 on neutral, CPU fixture exact).
-  (3) Long context: 50K prefill result (long50k.log), then prefill 25% of 200K/500K; decode at depth; consider a gather
-  path for decode (masked FA reads the whole latent cache). (4) Re-seed the VRAM cache after chunked prefill (margin
+  (3) Long context deeper: prefill ~25% of 200K/500K (Mal: prove it, don't fill it) and decode at that depth; a
+  gather path for decode if masked FA over the whole latent cache starts to cost (it didn't at 50K). (4) Re-seed the VRAM cache after chunked prefill (margin
   5.5 costs ~500 slots / ~1 tok/s). (5) Abliteration: transplant drowzeys' 30 o_proj tensors (L15-43 + MTP) -> Q4_K
   attn_output, instead of the expert LoRA. (6) Bigger chunks (4096) for 300-500+ prefill.
 
