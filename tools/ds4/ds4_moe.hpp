@@ -256,6 +256,13 @@ struct Ds4MoeConfig {
     /// Prompt chunks (run_chunk): the same rule for prefill - a file-tier entry below `skip_file_chunk` x its token's
     /// weight sum is computed by the token's heaviest expert with weight 0 instead (never read).  0 = off.
     float skip_file_chunk = 0.0f;
+    /// Skip renormalization (s21 lead; default off = byte-identical to before).  Dropping a low-weight expert zeros its
+    /// term but the sum is NOT rescaled, so the layer output shrinks by the dropped weight fraction - a systematic
+    /// magnitude error that grows with the drop rate and shadows the ppl curve (and, with a routed-expert LoRA, breaks
+    /// the ablation's all-or-nothing property -> the s20 repetition loop).  When on, the contributing weights are
+    /// scaled by Sum(all w) / Sum(kept w) per token (exactly 1.0 when nothing is dropped, so no-drop runs are
+    /// unchanged).  Decode: a scalar on the host sum; chunks: c_w pre-scaled before weighted_rows_sum.
+    bool renorm_skip = false;
     /// Decode (MiMo and DS4): a PCIe-share miss (and a prefetched expert the routing used) takes
     /// the least-recently-used VRAM slot of its layer instead of a staging buffer, so the cache follows the
     /// conversation (route_probe sim, 1800 slots: static 40.5% held-out hit, LRU 61.6%; FINDINGS s16).  Same math per

@@ -1657,6 +1657,15 @@ bool gpu_run(Ds4MoeImpl& im, int64_t layer, const int32_t* ids6, const float* w6
     // it cannot be told to leave the pool's indices alone - the index's own source selects which buffer to read.
     // Reading `gpu_parts` for a CPU-computed index would sum uninitialized device memory, which is why this is not
     // a detail (the gate's file-tier arm caught it: the replay is speed-only and never sums a layer).
+    // renorm_skip (default off): dropping a low-weight expert removes its term but not the scale, so the sum shrinks
+    // by the dropped weight fraction (s21 lead).  Rescale by Sum(all w) / Sum(kept w) per token; exactly 1.0 when
+    // nothing was dropped, so a no-drop token is unchanged.
+    double skip_scale = 1.0;
+    if (im.cfg.renorm_skip) {
+        double w_all = 0, w_kept = 0;
+        for (int64_t k = 0; k < K; ++k) { w_all += (double) w6[k]; if (wloc[k] != 0.0f) w_kept += (double) wloc[k]; }
+        if (w_kept > 0.0 && w_kept < w_all) skip_scale = w_all / w_kept;
+    }
     for (int64_t i = 0; i < H; ++i) {
         double s = 0;
         for (int64_t k = 0; k < K; ++k) {
@@ -1665,7 +1674,7 @@ bool gpu_run(Ds4MoeImpl& im, int64_t layer, const int32_t* ids6, const float* w6
                                       : gpu_parts + (size_t) k * (size_t) H;
             s += (double) wloc[k] * (double) p[(size_t) i];
         }
-        out[i] = (float) s;
+        out[i] = (float) (s * skip_scale);
     }
 
     mark(6);
@@ -1957,9 +1966,11 @@ bool gpu_run_chunk(Ds4MoeImpl& im, int64_t layer, int n, const int32_t* ids, con
     // heaviest expert with weight 0 (contributes nothing); an expert left without entries is never read
     std::vector<int32_t> ids_s;
     std::vector<float> w_s;
+    std::vector<float> tok_scale;   // renorm_skip: per-token Sum(all w) / Sum(kept w); empty = no rescale
     if (im.cfg.skip_file_chunk > 0.0f && gp.arena.base && !gp.arena.slot_of.empty()) {
         ids_s.assign(ids, ids + NE);
         w_s.assign(w, w + NE);
+        if (im.cfg.renorm_skip) tok_scale.assign((size_t) n, 1.0f);
         for (int64_t t = 0; t < n; ++t) {
             double ws = 0;
             int64_t top = 0;
@@ -1967,6 +1978,7 @@ bool gpu_run_chunk(Ds4MoeImpl& im, int64_t layer, int n, const int32_t* ids, con
                 ws += (double) w[t * K + k];
                 if (w[t * K + k] > w[t * K + top]) top = k;
             }
+            double ws_kept = ws;
             for (int64_t k = 0; k < K; ++k) {
                 const int64_t jj = t * K + k;
                 const int32_t e = ids[jj];
@@ -1976,8 +1988,11 @@ bool gpu_run_chunk(Ds4MoeImpl& im, int64_t layer, int n, const int32_t* ids, con
                 if ((double) w[jj] >= (double) im.cfg.skip_file_chunk * ws) continue;
                 ids_s[(size_t) jj] = ids[t * K + top];
                 w_s[(size_t) jj] = 0.0f;
+                ws_kept -= (double) w[jj];
                 ++im.st.skipped_file;
             }
+            if (!tok_scale.empty() && ws_kept > 0.0 && ws_kept < ws)
+                tok_scale[(size_t) t] = (float) (ws / ws_kept);
         }
         ids = ids_s.data();
         w = w_s.data();
@@ -2409,7 +2424,13 @@ bool gpu_run_chunk(Ds4MoeImpl& im, int64_t layer, int n, const int32_t* ids, con
     }
 
     // ---- outputs: the top-k mix on the card, n rows back ----
-    ck(cudaMemcpyAsync(gp.c_w, w, sizeof(float) * (size_t) NE, cudaMemcpyHostToDevice, gp.s), "c_w");
+    if (tok_scale.empty()) {
+        ck(cudaMemcpyAsync(gp.c_w, w, sizeof(float) * (size_t) NE, cudaMemcpyHostToDevice, gp.s), "c_w");
+    } else {   // renorm_skip: scale each token's top-k weights by the surviving fraction before the sum
+        std::vector<float> w_up((size_t) NE);
+        for (int64_t j = 0; j < NE; ++j) w_up[(size_t) j] = w[(size_t) j] * tok_scale[(size_t) (j / K)];
+        ck(cudaMemcpyAsync(gp.c_w, w_up.data(), sizeof(float) * (size_t) NE, cudaMemcpyHostToDevice, gp.s), "c_w");
+    }
     strata::kernels::weighted_rows_sum((const float*) gp.c_parts, (const float*) gp.c_w, (int) K, H, n,
                                        (float*) gp.c_out, gp.s);
     if (out_dev)   // straight into the caller's device tensor (no host round trip)
