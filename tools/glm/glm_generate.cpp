@@ -41,7 +41,7 @@ struct Args {
     double vram_margin_gib = 1.0, pcie = 0.25, pf_b = 1.43, arena_gib = 60.0;
     int threads = 0;
     int64_t ctx = 0;
-    float temp = 0.0f, route_bias = 0.0f, prune_penalty = 0.0f, skip_miss = 0.0f;
+    float temp = 0.0f, route_bias = 0.0f, prune_penalty = 0.0f, skip_miss = 0.0f, skip_file = 0.0f, arena_admit = 0.0f;
     uint64_t seed = 1;
     std::vector<int> stop;
     bool ppl = false, vram_lru = false, arena_adapt = false, arena_skip = false;
@@ -97,6 +97,8 @@ bool parse(int argc, char ** argv, Args & a) {
         else if (k == "--saliency") a.saliency = next();
         else if (k == "--prune") a.prune = next();
         else if (k == "--skip-miss") a.skip_miss = (float) std::atof(next().c_str());
+        else if (k == "--skip-file") a.skip_file = (float) std::atof(next().c_str());
+        else if (k == "--arena-admit") a.arena_admit = (float) std::atof(next().c_str());
         else if (k == "--prune-penalty") a.prune_penalty = (float) std::atof(next().c_str());
         else { std::fprintf(stderr, "glm_generate: unknown argument %s\n", k.c_str()); return false; }
     }
@@ -129,7 +131,9 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "usage: glm_generate -m model.gguf (--ids 1,2,3 | --ids-file f.i32) [-n 64] [--backend cuda|cpu]\n"
                              "       [--experts gpu|cpu] [--slots auto|N] [--arena-gib 60] [--profile routes.bin] [--vram-lru]\n"
                              "       [--route-bias X] [--ctx N] [--temp 0] [--stop id,id] [--ppl] [--dump-logits f] [--dump-routes f]\n"
-                             "       [--lora adapter.gguf] [--prefill-chunk N [--chunk-mmq] [--chunk-prestage]] [--allow-long-ctx]\n");
+                             "       [--lora adapter.gguf] [--prefill-chunk N [--chunk-mmq] [--chunk-prestage]] [--allow-long-ctx]\n"
+                             "       [--prune f [--prune-penalty X]] [--arena-adapt [--arena-admit HALF_LIFE_TOKENS]]\n"
+                             "       [--skip-miss T] [--skip-file T]\n");
         return 2;
     }
     std::vector<int> prompt = a.ids_csv.empty() ? std::vector<int>() : parse_csv(a.ids_csv);
@@ -206,6 +210,9 @@ int main(int argc, char ** argv) {
     mc.chunk_mmq = a.chunk_mmq;
     mc.chunk_prestage = a.chunk_prestage;
     mc.saliency = !a.saliency.empty();
+    mc.skip_file = a.skip_file;   // decode: same, only for experts the arena does not hold (file tier)
+    mc.arena_admit = a.arena_admit;   // arena_adapt gate: heat half-life in tokens (0 = promote on first read)
+    if (a.arena_admit > 0.0f) mc.arena_adapt = true;
     mc.skip_miss = a.skip_miss;   // decode: drop a VRAM-miss expert weighing < skip_miss x the token's weight sum
     if (mc.saliency && a.prefill_chunk <= 0) { std::fprintf(stderr, "glm_generate: --saliency needs --prefill-chunk\n"); return 2; }
     // --prune FILE: "layer expert" lines; those experts are never routed (selection bias -1e30, REAP-style pruning)
@@ -481,9 +488,10 @@ int main(int argc, char ** argv) {
                  (double) st.prefetch_issued / dec_steps, 100.0 * (double) st.cpu / look, 100.0 * (double) st.pcie / look,
                  (long long) st.file_tier, (double) st.skipped / dec_steps);
     if (a.vram_lru || st.file_tier > 0)
-        std::fprintf(stderr, "tier moves: vram_lru swaps %.2f/pass (demoted %lld), arena swaps %lld, file reads %.2f ms/pass\n",
+        std::fprintf(stderr, "tier moves: vram_lru swaps %.2f/pass (demoted %lld), arena swaps %lld (admit rejects %lld), "
+                             "file reads %.2f ms/pass, file-tier skipped %lld\n",
                      (double) st.vram_swaps / dec_steps, (long long) st.vram_demotes, (long long) st.arena_swaps,
-                     st.file_ms / dec_steps);
+                     (long long) st.admit_rejects, st.file_ms / dec_steps, (long long) st.skipped_file);
     std::fprintf(stderr, "decode ms/token: predict+prefetch %.2f, attention+router %.2f, experts %.2f, finish %.2f, head %.2f\n",
                  t_ph[0] / dec_steps, t_ph[1] / dec_steps, t_ph[2] / dec_steps, t_ph[3] / dec_steps, t_ph[4] / dec_steps);
     std::fprintf(stderr, "tier ms/token: wall %.2f (gpu hits %.2f, pcie %.2f, cpu pool %.2f)\n", st.wall_ms / dec_steps,

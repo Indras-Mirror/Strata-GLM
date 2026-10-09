@@ -295,6 +295,13 @@ struct Ds4MoeImpl {
     int pf_n = 0;                     ///< staging slots the last prefetch() filled
     std::unique_ptr<Gpu> gpu;         ///< null in a CPU-only tier
     std::vector<int64_t> last_use;    ///< arena_adapt: (layer, expert) -> the run() call that last used it
+    std::vector<float> heat;          ///< arena_admit: (layer, expert) -> decayed lookup count as of heat_t
+    std::vector<int64_t> heat_t;
+    /// arena_admit: the heat of entry i decayed to the current tick (one tick = one run() call = 1/n_routed token)
+    float heat_now(size_t i) const {
+        const double age = (double) (tick - heat_t[i]) / (double) std::max<int64_t>(1, g.n_routed());
+        return heat[i] * (float) std::exp2(-age / (double) cfg.arena_admit);
+    }
     int64_t tick = 0;
     std::vector<int64_t> vlast;       ///< vram_lru: (layer, expert) -> the run() call that last used its VRAM copy
     std::vector<int64_t> vmiss;       ///< vram_lru: (layer, expert) -> the layer's call count at its last miss
@@ -1162,6 +1169,17 @@ bool gpu_run(Ds4MoeImpl& im, int64_t layer, const int32_t* ids6, const float* w6
         if (im.last_use.empty()) im.last_use.assign((size_t) (im.g.n_layers * NX), -1);
         ++im.tick;
         for (int64_t k = 0; k < K; ++k) im.last_use[(size_t) (layer * NX + ids6[k])] = im.tick;
+        if (im.cfg.arena_admit > 0.0f) {
+            if (im.heat.empty()) {
+                im.heat.assign((size_t) (im.g.n_layers * NX), 0.0f);
+                im.heat_t.assign((size_t) (im.g.n_layers * NX), 0);
+            }
+            for (int64_t k = 0; k < K; ++k) {
+                const size_t i = (size_t) (layer * NX + ids6[k]);
+                im.heat[i] = im.heat_now(i) + 1.0f;
+                im.heat_t[i] = im.tick;
+            }
+        }
     }
     const cpu::NativeFmt& f = im.fl[(size_t) layer];
     const strata::kernels::NativeExpertLayout& GL = gp.gll[(size_t) layer];
@@ -1193,13 +1211,16 @@ bool gpu_run(Ds4MoeImpl& im, int64_t layer, const int32_t* ids6, const float* w6
     // skip_miss: a miss with a small gate weight is dropped - its 6.75 MB never moves (wloc = the weights the sum uses)
     float wloc[kMaxParts];
     for (int64_t k = 0; k < K; ++k) wloc[k] = w6[k];
-    if (im.cfg.skip_miss > 0.0f && nc > 0) {
+    if ((im.cfg.skip_miss > 0.0f || im.cfg.skip_file > 0.0f) && nc > 0) {
         double ws = 0;
         for (int64_t k = 0; k < K; ++k) ws += (double) w6[k];
+        const bool arena = gp.arena.base && !gp.arena.slot_of.empty();
         int keep = 0;
         for (int i = 0; i < nc; ++i) {
             const int32_t k = cpu_i[i];
-            if ((double) w6[k] < (double) im.cfg.skip_miss * ws) { wloc[k] = 0.0f; ++st.skipped; }
+            const bool file = arena && gp.arena.slot_of[(size_t) (layer * im.g.n_experts + ids6[k])] < 0;
+            const float thr = std::max(im.cfg.skip_miss, file ? im.cfg.skip_file : 0.0f);
+            if ((double) w6[k] < (double) thr * ws) { wloc[k] = 0.0f; ++st.skipped; st.skipped_file += file; }
             else cpu_i[keep++] = k;
         }
         nc = keep;
@@ -1425,7 +1446,9 @@ bool gpu_run(Ds4MoeImpl& im, int64_t layer, const int32_t* ids6, const float* w6
             for (size_t q = 0; q < fi.size(); ++q) {
                 fdst[q] = im.ftmp.data() + (size_t) fi[q] * (size_t) im.blob;
                 if (!direct) continue;
+                const bool admit = im.cfg.arena_admit > 0.0f && !im.heat.empty();
                 int64_t victim = -1, best = INT64_MAX;
+                float vheat = 0.0f;
                 for (int64_t v = 0; v < NX; ++v) {
                     if (gp.arena.slot_of[(size_t) (layer * NX + v)] < 0) continue;
                     const int64_t u = im.last_use[(size_t) (layer * NX + v)];
@@ -1433,9 +1456,16 @@ bool gpu_run(Ds4MoeImpl& im, int64_t layer, const int32_t* ids6, const float* w6
                     bool taken = false;
                     for (size_t r = 0; r < q && !taken; ++r) taken = fvic[r] == (int32_t) v;
                     if (taken) continue;
-                    if (u < best) { best = u; victim = v; }
+                    if (admit) {   // the coldest arena expert (ties: the least recently used)
+                        const float h = im.heat_now((size_t) (layer * NX + v));
+                        if (victim < 0 || h < vheat || (h == vheat && u < best)) { vheat = h; best = u; victim = v; }
+                    } else if (u < best) { best = u; victim = v; }
                 }
                 if (victim < 0) continue;
+                if (admit) {
+                    const float c = im.heat[(size_t) (layer * NX + ids6[cpu_keep[fi[q]]])];   // updated this call
+                    if (c < 2.0f || c <= vheat) { ++im.st.admit_rejects; continue; }
+                }
                 fvic[q] = (int32_t) victim;
                 fdst[q] = (uint8_t*) gp.arena.base +
                           (size_t) gp.arena.off[(size_t) gp.arena.slot_of[(size_t) (layer * NX + victim)]];
@@ -2556,6 +2586,8 @@ void Ds4MoeStats::add(const Ds4MoeStats& o) {
     vram_swaps += o.vram_swaps;
     vram_demotes += o.vram_demotes;
     skipped += o.skipped;
+    skipped_file += o.skipped_file;
+    admit_rejects += o.admit_rejects;
     gap_ms += o.gap_ms;
     hit_ms += o.hit_ms;
     pcie_ms += o.pcie_ms;

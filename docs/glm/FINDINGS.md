@@ -235,3 +235,31 @@ NOT measured yet: anything on the real model.
   process check). memguard.sh already takes ds4-gpu.lock for each run, so an outer `flock` on the same lock
   deadlocks: never wrap memguard runs in it. c5-hard-chat.log was truncated by the duplicate's start; its ppl
   (8.9493) came from the monitor (`c5-hard-chat.note`).
+
+## s11 (2026-10-09 17:12-17:21): clean base; winning back soft-prune decode (bench/glm-2026-10-09/chain6.sh)
+- **Base measured again after the allocator fix** (no prune, chunk 1024, margin 5.5): eval_chat **5.547** (s7 said 5.633),
+  eval_code **3.668** (3.676). Against it: soft 0.02 chat 5.457 (-1.6%), soft 0.05 chat 5.516 (-0.6%) / code 3.583
+  (-2.3%), hard 25% code 3.564 (-2.8%) but chat 8.95 (+61%). **Soft prune 25% costs no quality vs unpruned** on
+  either the calibrated domain or the held-out language, and is slightly better on these evals.
+- New tier options (tools/ds4/ds4_moe.{hpp,cpp}, glm_generate flags; both default off):
+  - `--skip-file T`: like skip_miss, but only for experts the arena does not hold (NVMe file tier = the soft-pruned
+    ones); dropped if their weight is < T x the token's weight sum.
+  - `--arena-admit H`: arena_adapt admission gate. Per-(layer, expert) heat with a half-life of H tokens; a file
+    read is promoted only if its heat is >= 2 and beats the coldest arena expert (which becomes the victim).
+- Decode (eval_code300: 300-token decode-loop prompt = ppl, then 64 tokens timed; margin 1; ezct 25% list):
+
+  | config | decode tok/s | ppl (299 tok) | file reads | file ms/pass | experts ms/token |
+  |---|---|---|---|---|---|
+  | hard 25% | **9.52** | 11.974 | 0 | 0 | 86.2 |
+  | soft 0.05 + adapt (s10, -n 32) | 7.57 | 11.764 | 282 | 43.4 | 114.1 |
+  | soft 0.05 + adapt + admit 64 | 7.20 | 11.860 | 709 | 51.8 | 121.0 |
+  | **soft 0.05 + adapt + skip-file 0.10** | **8.46** | **11.554** | 249 (494 skipped) | 21.3 | 98.8 |
+  | soft 0.05 + adapt + admit 64 + skip-file 0.10 | 8.23 | 11.676 | 304 (580 skipped) | 26.3 | 102.4 |
+
+  The gate is a loss: GLM's routing is flat, so the soft-pruned experts that do win come back often enough that
+  refusing to cache them means re-reading them from NVMe (709 reads vs 282). Promote-on-first-read stays the default.
+  skip-file 0.10 halves the NVMe time and gets back 0.9 of the 1.95 tok/s soft prune costs, with no ppl loss (the
+  299-token decode-loop ppl spread here is ~3%, i.e. noise level; it is not a gain).
+- Remaining gap to hard: ~21 ms/pass of file reads + a slightly busier CPU pool. Next: skip-file 0.15/0.20, penalty
+  0.10 (fewer soft-pruned wins), and skip-file + skip-miss 0.05 to buy back speed elsewhere; chunked prefill
+  (161 -> ~100 tok/s under soft prune) has no skip yet; run_chunk is the place to add it.

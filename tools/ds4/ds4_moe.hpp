@@ -213,6 +213,11 @@ struct Ds4MoeConfig {
     /// Decode: a file-tier expert that `run` had to read replaces the least-recently-used arena expert of its layer
     /// (same blob size), so the experts a conversation uses stay in RAM after their first use.  Off = static arena.
     bool arena_adapt = false;
+    /// arena_adapt admission gate (TinyLFU / Infernix style): every lookup adds 1 to a per-(layer, expert) heat that
+    /// halves every `arena_admit` tokens; a file-tier read is promoted only if its heat is >= 2 (seen twice in the
+    /// window) AND beats the coldest arena expert of its layer, which is then the victim (instead of the LRU one).
+    /// Rejected reads go through the scratch buffer as without arena_adapt.  0 = promote on first read (as before).
+    float arena_admit = 0.0f;
     /// Prompt chunks (`run_chunk`): the streamed experts' products through llama.cpp's MMQ (int8 tensor cores; the
     /// activations rounded to MMQ's q8_1) instead of the grouped MMVQ kernel, on the layers whose gate/up/down types
     /// MMQ covers and that have no SwiGLU clamp.  Needs a build with the prompt MMQ path (`strata_mmq`, with
@@ -227,6 +232,9 @@ struct Ds4MoeConfig {
     /// Decode (run): a routed expert that is a VRAM miss and weighs less than `skip_miss` x the token's weight sum is
     /// dropped (not fetched, contributes 0).  Hits are never dropped.  0 = off.  A quality trade: measure ppl.
     float skip_miss = 0.0f;
+    /// Decode (run): like skip_miss, but only for experts the arena does not hold (the NVMe file tier, e.g. soft-pruned
+    /// experts): dropped if they weigh < `skip_file` x the token's weight sum.  The larger of the two applies.  0 = off.
+    float skip_file = 0.0f;
     /// Decode (MiMo and DS4): a PCIe-share miss (and a prefetched expert the routing used) takes
     /// the least-recently-used VRAM slot of its layer instead of a staging buffer, so the cache follows the
     /// conversation (route_probe sim, 1800 slots: static 40.5% held-out hit, LRU 61.6%; FINDINGS s16).  Same math per
@@ -254,6 +262,8 @@ struct Ds4MoeStats {
     int64_t vram_swaps = 0;         ///< vram_lru: misses / prefetches moved into a VRAM slot
     int64_t vram_demotes = 0;       ///< ...of which the victim went back to the arena (it had no arena copy)
     int64_t skipped = 0;            ///< skip_miss: low-weight misses dropped
+    int64_t skipped_file = 0;       ///< ...of which file-tier experts (skip_file or skip_miss)
+    int64_t admit_rejects = 0;      ///< arena_admit: file-tier reads not promoted (too cold)
 
     void add(const Ds4MoeStats& o);
     int64_t lookups() const { return hits + cpu + pcie + skipped; }

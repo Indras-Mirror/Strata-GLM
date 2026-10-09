@@ -1,0 +1,52 @@
+### c6-base-chat 17:12:37
+exit 0 17:14:39
+tier: gpu, 1480 resident slots, arena 72.0 GiB (9250 experts), file tier 1366; load 95.5 s
+ppl: 1999 positions, mean NLL 1.71334, perplexity 5.5474
+prefill: 2000 tokens in 23.03 s = 86.84 tok/s (chunked)
+decode : 1 tokens, 1 forward passes in 0.00 s = 9576.62 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+### c6-base-code 17:14:39
+exit 0 17:16:06
+tier: gpu, 1478 resident slots, arena 72.0 GiB (9250 experts), file tier 1368; load 58.5 s
+ppl: 1999 positions, mean NLL 1.29974, perplexity 3.6684
+prefill: 2000 tokens in 25.08 s = 79.74 tok/s (chunked)
+decode : 1 tokens, 1 forward passes in 0.00 s = 9628.25 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+### c6-hard-dec 17:16:06
+exit 0 17:17:22
+tier: gpu, 2090 resident slots, arena 58.8 GiB (6982 experts), file tier 0; load 35.1 s
+ppl: 299 positions, mean NLL 2.48276, perplexity 11.9742
+prefill: 300 tokens in 30.75 s = 9.75 tok/s (decode-loop prefill)
+decode : 64 tokens, 63 forward passes in 6.62 s = 9.52 tok/s
+experts/token: hit 34.0% (prefetched-useful 37.9/token of 59.9 issued), cpu 49.5%, pcie 16.5%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 2.27, attention+router 13.77, experts 86.19, finish 1.95, head 0.50
+### c6-admit-dec 17:17:22
+exit 0 17:18:50
+tier: gpu, 2090 resident slots, arena 58.8 GiB (6982 experts), file tier 0; load 32.9 s
+ppl: 299 positions, mean NLL 2.47319, perplexity 11.8603
+prefill: 300 tokens in 43.74 s = 6.86 tok/s (decode-loop prefill)
+decode : 64 tokens, 63 forward passes in 8.74 s = 7.20 tok/s
+experts/token: hit 34.1% (prefetched-useful 41.0/token of 59.9 issued), cpu 50.2%, pcie 15.6%, file tier 709, skipped 0.0/token
+tier moves: vram_lru swaps 0.00/pass (demoted 0), arena swaps 134 (admit rejects 443), file reads 51.81 ms/pass, file-tier skipped 0
+decode ms/token: predict+prefetch 2.25, attention+router 13.45, experts 120.97, finish 1.41, head 0.49
+### c6-skipf-dec 17:18:50
+exit 0 17:20:08
+tier: gpu, 2091 resident slots, arena 58.8 GiB (6981 experts), file tier 0; load 33.3 s
+ppl: 299 positions, mean NLL 2.44704, perplexity 11.5541
+prefill: 300 tokens in 35.32 s = 8.49 tok/s (decode-loop prefill)
+decode : 64 tokens, 63 forward passes in 7.44 s = 8.46 tok/s
+experts/token: hit 34.0% (prefetched-useful 41.0/token of 59.9 issued), cpu 48.1%, pcie 15.6%, file tier 249, skipped 7.8/token
+tier moves: vram_lru swaps 0.00/pass (demoted 0), arena swaps 170 (admit rejects 0), file reads 21.26 ms/pass, file-tier skipped 494
+decode ms/token: predict+prefetch 2.36, attention+router 13.93, experts 98.77, finish 2.30, head 0.51
+### c6-both-dec 17:20:08
+exit 0 17:21:29
+tier: gpu, 2088 resident slots, arena 58.8 GiB (6984 experts), file tier 0; load 34.4 s
+ppl: 299 positions, mean NLL 2.45754, perplexity 11.6760
+prefill: 300 tokens in 36.19 s = 8.29 tok/s (decode-loop prefill)
+decode : 64 tokens, 63 forward passes in 7.66 s = 8.23 tok/s
+experts/token: hit 33.9% (prefetched-useful 40.4/token of 59.9 issued), cpu 47.9%, pcie 15.5%, file tier 304, skipped 9.2/token
+tier moves: vram_lru swaps 0.00/pass (demoted 0), arena swaps 77 (admit rejects 146), file reads 26.32 ms/pass, file-tier skipped 580
+decode ms/token: predict+prefetch 2.34, attention+router 13.74, experts 102.41, finish 2.28, head 0.50
+=== chain6 done 17:21:29

@@ -1,0 +1,80 @@
+memguard: scope ds4-guard-251400 MemoryMax=84G swap=0 floor=4 GiB (avail 83 GiB)
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24080 MiB):
+  Device 0: NVIDIA GeForce RTX 4090, compute capability 8.9, VMM: yes, VRAM: 24080 MiB
+dense backend: CUDA0
+glm5-next: 45 layers (34 KDA, 11 MLA), 288 experts top-8, vocab 154880; dense half loaded in 2.9 s
+slots auto: 17.07 GiB free after the dense half -> 16.07 GiB of expert slots (margin 1.00 GiB)
+prune: 3024 (layer, expert) pairs masked out of routing (bench/glm-2026-10-09/prune-ezct-0.25.txt)
+tier: gpu, 2090 resident slots, arena 58.8 GiB (6982 experts), file tier 0; load 35.1 s
+ppl: 299 positions, mean NLL 2.48276, perplexity 11.9742
+4938
+4292
+262
+442
+576
+43405
+374
+312
+31964
+decode 8/64 tokens | 9.57 tok/s   7295
+817
+1618
+320
+35757
+36202
+701
+323
+decode 16/64 tokens | 9.46 tok/s   279
+4147
+374
+312
+31964
+7295
+817
+1618
+decode 24/64 tokens | 9.47 tok/s   320
+5909
+36202
+4292
+262
+442
+576
+4147
+decode 32/64 tokens | 9.54 tok/s   374
+312
+31964
+7295
+817
+1618
+320
+5909
+decode 40/64 tokens | 9.55 tok/s   36202
+4292
+262
+442
+576
+4147
+374
+312
+decode 48/64 tokens | 9.49 tok/s   31964
+7295
+817
+1618
+320
+5909
+36202
+4292
+decode 56/64 tokens | 9.50 tok/s   262
+442
+576
+4147
+374
+312
+31964
+
+prefill: 300 tokens in 30.75 s = 9.75 tok/s (decode-loop prefill)
+decode : 64 tokens, 63 forward passes in 6.62 s = 9.52 tok/s
+experts/token: hit 34.0% (prefetched-useful 37.9/token of 59.9 issued), cpu 49.5%, pcie 16.5%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 2.27, attention+router 13.77, experts 86.19, finish 1.95, head 0.50
+tier ms/token: wall 86.18 (gpu hits 11.50, pcie 34.30, cpu pool 79.46)
+VRAM free at the end: 0.39 GiB
