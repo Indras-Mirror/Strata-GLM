@@ -17,7 +17,41 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
 `docs/glm/FINDINGS.md`; then the DS4 docs we build on: `docs/ds4/RESUME_PROMPT.md` (rules, gates, lessons),
 `docs/ds4/ENGINE_DENSE.md`, `docs/ds4/ENGINE_MOE.md`; `git log --oneline -15`.
 
-## State (2026-10-09 LATE) - **CURRENT, read this first**
+## State (2026-10-10) - **CURRENT: UPSTREAM MERGED** (supersedes the 2026-10-09 block below)
+**glm is now a real descendant of upstream Strata.** `glm` == `87cd462f`, a MERGE whose second parent is
+`upstream/main` (fb58e0db), so from here a plain `git merge upstream/main` syncs - no graft, no rebase.
+**Local only, NOT pushed.** (DS4 did the same: deepseek4 = 497dbd47 contains merge cc55d4c9.)
+
+- HOW the graft worked: `git replace --graft 6f32ec07 a1641e9f && git merge --no-ff --no-commit upstream/main;
+  git replace -d 6f32ec07`. Our old origin/main 6f32ec07 is TREE-IDENTICAL to upstream a1641e9f (filter-repo rewrote
+  hashes); the replace ref is REPO-GLOBAL, delete it immediately. Same 8 conflicts as DS4's: CMakeLists.txt, README.md,
+  src/kernels/cpu/{iq_avx2,native_expert,pool}.cpp, src/kernels/cuda/iq_kernels.cu, src/prefill/moe_mmq.cu,
+  tools/strata_tokenizer.py. README: ours + upstream's moved to README.strata.md.
+- SHARED CORE = DS4's merge commit **cc55d4c9** (in the shared object store): `git checkout cc55d4c9 --   src/kernels/cpu/iq_avx2.cpp src/kernels/cpu/iq_avx2_rows.inl include/strata/kernels/cpu/iq_avx2.hpp   src/kernels/cpu/pool.cpp src/prefill/moe_mmq.cu tools/strata_tokenizer.py tools/ds4/cmake/ds4_dense.cmake`.
+  pool.cpp and moe_mmq.cu came out byte-identical to DS4's. **KEEP OUR native_expert.cpp** (native_fmt3; there is NO
+  PTQ1_0 in the GLM fork - Mal). iq_kernels.cu: start from cc55d4c9, re-add ONLY our abliteration LoRA
+  (lora_down_kernel + the `lora` param + forcing sw_v1 so the float `h` exists).
+- ISOLATION (Mal's ask, now structural): upstream's `STRATA_GU/D/MMVQ_FMTS` stay VERBATIM and fork formats live in
+  `STRATA_*_FMTS_FORK` macros expanded at each use site. GLM needs **X(12) added to STRATA_D_FMTS_FORK** (Q4_K
+  down_exps, layers 3-5) - upstream's STRATA_D_FMTS has no Q4_K down, so without it tier init dies with
+  "native_expert_grouped has no kernel for layer 3's types 12/12/12".
+- BUILD (a worktree has no third_party/llama.cpp): `cmake -G Ninja -DCMAKE_BUILD_TYPE=Release
+  -DCMAKE_CUDA_ARCHITECTURES=89 -DSTRATA_ENABLE_CUDA=ON -DSTRATA_GGML_CUDA=ON -DGGML_CUDA=ON -DGGML_CUDA_FA=ON
+  -DGGML_CUDA_GRAPHS=ON -DSTRATA_MMQ_KQUANTS=ON -DSTRATA_NATIVE_EXPERTS=ON
+  -DSTRATA_GGML_DIR=<main worktree>/third_party/llama.cpp`. glm.cmake and ds4_dense.cmake now honour STRATA_GGML_DIR.
+  **Without STRATA_GGML_CUDA/GGML_CUDA_FA/GGML_CUDA_GRAPHS you get a 64 MB binary with NO ggml-cuda; the correct one
+  is ~679 MB / 3117 cubins (`cuobjdump --list-elf | wc -l`).**
+- GATES (2026-10-10, all green): build 679 MB / 3117 cubins; pool_tasks_test 168 bitwise; q8k_quant_parity identical;
+  iq_avx2_parity 0 failures; code ppl 3.6478 + chat 5.7046 (pre-merge code 3.6066 = +1.1%, inside the residency
+  noise - NOT A/B'd against the old binary); **abliteration gate: code ppl WITH the routed-expert LoRA 3.5943 vs
+  pre-merge 3.5967 -> the spliced LoRA is correct.** Gate script: bench/glm-2026-10-09/gate-um.sh.
+- NEXT: (1) adopt DS4's **20618210** - pure MOVES, every signature unchanged: fork code into
+  src/kernels/cuda/fork/*.cuh behind one #include, our LoRA kernels there too, so our shared files match DS4's;
+  (2) measure GLM decode on the merged build - DS4's merge gave **+15% decode** (19.55 vs 16.8-17.3 tok/s, ppl flat),
+  GLM probably gains too (our pre-merge was 20.65 tok/s at skip-miss 0.15); (3) scratch worktrees
+  ~/AI/Strata-GLM-rebase and ~/AI/Strata-GLM-um are droppable.
+
+## State (2026-10-09 LATE) - superseded by the block above
 **Serving is DONE and the model is fast. The abliteration is half-applied (mechanically working now) and its
 QUALITY is the open problem.** Public repo github.com/Indras-Mirror/Strata-GLM (remote `glm`, branch `glm`);
 last pushes `62808ddf`, `52bd0ad3`. Commit as you go; push to `glm` (Mal asks for it).

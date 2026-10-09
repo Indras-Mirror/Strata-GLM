@@ -572,3 +572,17 @@ GLM-5.3-Flash on this tier unless the expert set becomes batch-reusable (e.g. fa
 layer output DOWN by the dropped weight fraction - a systematic magnitude error that grows with the dropped fraction and
 shadows the ppl curve. Renormalizing by the surviving sum is a small change and could make skip-miss near-free at higher
 values (and possibly compatible with the routed LoRA). NOT tested.
+
+## s22 (2026-10-10): UPSTREAM MERGED into glm (upstream is now a real parent)
+`glm` == `87cd462f`, a merge whose 2nd parent is `upstream/main` (fb58e0db) -> plain `git merge upstream/main` syncs
+from here. Recipe: `git replace --graft 6f32ec07 a1641e9f && git merge --no-ff --no-commit upstream/main;
+git replace -d 6f32ec07` (6f32ec07 is tree-identical to a1641e9f; the replace ref is repo-global - delete at once).
+Same 8 conflicts as DS4's merge; shared core taken from DS4's cc55d4c9; native_expert.cpp kept OURS (no PTQ1_0 in
+GLM); README -> ours + README.strata.md.
+- Isolation now structural: upstream's STRATA_GU/D/MMVQ_FMTS verbatim + STRATA_*_FMTS_FORK macros. Two needed
+  additions: GLM's Q4_K down_exps is X(12) (upstream's D list has none) -> tier init otherwise fails.
+- Build: ~679 MB / 3117 cubins WITH ggml-cuda; a missing -DSTRATA_GGML_CUDA/-DGGML_CUDA_FA/-DGGML_CUDA_GRAPHS gives a
+  64 MB binary with no ggml-cuda (this cost me a debug cycle). glm.cmake/ds4_dense.cmake honour STRATA_GGML_DIR.
+- Gates green: pool_tasks 168 bitwise, q8k identical, iq_avx2_parity 0 failures, code ppl 3.6478 / chat 5.7046
+  (pre-merge code 3.6066 = +1.1%, inside residency noise, not A/B'd), LoRA gate 3.5943 vs pre-merge 3.5967 (correct).
+- DS4's merge gave +15% decode (19.55 vs 16.8-17.3, ppl flat) - GLM decode not yet measured on the merged build.
