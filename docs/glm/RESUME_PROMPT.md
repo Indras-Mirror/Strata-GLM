@@ -29,8 +29,12 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
   --skip-miss 0.10, +4% ppl). Hard prune hurts uncalibrated languages (German -18..-29%).
 - **Long context WORKS (FINDINGS s9):** `--ctx 524288` allocates (~6 GB latent cache, 734 VRAM slots left at margin
   5.5); 50K-token prefill **229.6 tok/s**; decode at 50K depth **8.23 tok/s** (vs ~8.5 at 2K).
-- **Next (in order):** (1) port DS4's soft prune: `--prune-penalty 0.5 --arena-adapt` with an en+zh+code+tools
-  calibration list (cal_code, cal_prose, cal_multi, cal_chat, cal_python, cal_json); eval code/chat/German.
+- **Soft prune DONE (FINDINGS s10-s12):** GLM's sigmoid router needs penalty ~0.05 (not DS4's 0.5). Recommended:
+  `--prune bench/glm-2026-10-09/prune-ezct-0.25.txt --prune-penalty 0.05 --arena-adapt --skip-file 0.15
+  --skip-file-prefill 0.15` -> decode ~9.8 tok/s (= hard prune), prefill 130-140, German +2% vs unpruned (hard +61%),
+  code -1.7%. `--arena-admit` (heat gate) is a loss on GLM: leave off. Clean base: chat 5.547, code 3.668.
+- **Next (in order):** (1) win back the last speed: skip-miss 0.05 on top (hard + 0.05 = 10.77 tok/s), VRAM re-seed
+  after prefill, bigger chunks; gate quality on the 2000-token chat/code evals (300-token decode ppl is noise).
   (2) Fork oracle: rebuild ~/AI/llama.cpp-glm53 CPU (patched, `GLM_NO_FUSED_LID=1`) and compare indexer scoring on the
   mini fixture past 11 tokens; then the GPU chunk-vs-loop ppl gap (18.47 vs 20.46 on neutral, CPU fixture exact).
   (3) Long context deeper: prefill ~25% of 200K/500K (Mal: prove it, don't fill it) and decode at that depth; a
