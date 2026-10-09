@@ -586,3 +586,9 @@ GLM); README -> ours + README.strata.md.
 - Gates green: pool_tasks 168 bitwise, q8k identical, iq_avx2_parity 0 failures, code ppl 3.6478 / chat 5.7046
   (pre-merge code 3.6066 = +1.1%, inside residency noise, not A/B'd), LoRA gate 3.5943 vs pre-merge 3.5967 (correct).
 - DS4's merge gave +15% decode (19.55 vs 16.8-17.3, ppl flat) - GLM decode not yet measured on the merged build.
+
+**s22 decode A/B (added):** pre-merge vs merged binary, IDENTICAL flags, both landed at file tier 146:
+pre-merge 15.69 tok/s, merged **16.25 tok/s = +3.6%** -> the merge does NOT regress decode; if anything it is
+slightly faster. The "20.65 tok/s at skip-miss 0.15" recorded in s18 was a FILE-TIER-0 run - the ~16 vs ~20.6 gap
+is residency (file tier 146 vs 0, i.e. how much of the expert set fits the arena), NOT the merge. Always compare at
+the same file tier (the tier line prints it).

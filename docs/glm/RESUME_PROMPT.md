@@ -47,8 +47,10 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
   pre-merge 3.5967 -> the spliced LoRA is correct.** Gate script: bench/glm-2026-10-09/gate-um.sh.
 - NEXT: (1) adopt DS4's **20618210** - pure MOVES, every signature unchanged: fork code into
   src/kernels/cuda/fork/*.cuh behind one #include, our LoRA kernels there too, so our shared files match DS4's;
-  (2) measure GLM decode on the merged build - DS4's merge gave **+15% decode** (19.55 vs 16.8-17.3 tok/s, ppl flat),
-  GLM probably gains too (our pre-merge was 20.65 tok/s at skip-miss 0.15); (3) scratch worktrees
+  (2) DONE - decode A/B pre-merge vs merged, identical flags, both at file tier 146: 15.69 -> **16.25 tok/s (+3.6%)**,
+  so the merge does NOT regress GLM decode. NOTE the ~20.65 tok/s in s18 was a FILE-TIER-0 run; always compare at the
+  same file tier (the tier line prints it) or the residency dominates the number. DS4's merge gave +15% - re-check
+  ours at file tier 0 when a window allows; (3) scratch worktrees
   ~/AI/Strata-GLM-rebase and ~/AI/Strata-GLM-um are droppable.
 
 ## State (2026-10-09 LATE) - superseded by the block above
