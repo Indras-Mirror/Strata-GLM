@@ -281,3 +281,21 @@ snapshot). Engines (tools/ds4, tools/glm) are 100% ours. Features are env-gated 
 FS_AHEAD / PREFILL_CPU_SHARE / MMVQ_IL_ROWS / STAGE_PIN) so nothing changes until switched on. Foresight + prefill
 CPU share need ENGINE-SIDE wiring (their wiring lives in upstream's src/program/generate.cpp, which we do not build).
 COORDINATE with strata-ds4-gpu: we share include/+src/, so this re-base should be done ONCE for both engines.
+
+UPDATE (2026-10-10, later): **the re-base BUILDS.** After the 8 conflicts were resolved by hand, the build failed with
+42 errors (40 in iq_avx2.cpp, 1 iq_kernels.cu:2521, 1 prefetch_ahead). CAUSE (strata-ds4-gpu's diagnosis, correct):
+our fork's iq_avx2.cpp "IQ2_XS block" is not ours - it is UPSTREAM'S OLD CODE, which upstream moved into
+src/kernels/cpu/iq_avx2_rows.inl. Our merge kept the old copy, so it lost its helpers (row_dot/prefetch_ahead).
+FIX: take upstream's iq_avx2.cpp + thread our SwiGLU `lim` clamp - do NOT try to restore the old block.
+Concretely, the ds4 session's re-base worktree **~/AI/Strata-DS4-up (branch ds4-upstream)** already had it resolved:
+  - src/kernels/cpu/iq_avx2.cpp      (upstream's + our lim; 15 lines off upstream)   -> copied verbatim
+  - src/kernels/cpu/iq_avx2_rows.inl (upstream's + our lim)                          -> copied verbatim
+  - src/kernels/cpu/pool.cpp         (our resolution matched theirs EXACTLY)          -> no change
+  - src/kernels/cpu/native_expert.cpp: theirs adds DS4-only PTQ1_0 (ternary id 143); KEEP OURS (no PTQ1_0 needed)
+  - src/kernels/cuda/iq_kernels.cu:   KEEP OURS (the abliteration LoRA kernels live here; theirs has none) - the one
+    fix is line ~2521 `swiglu_entries_kernel<<<...>>>(gate, up, h, nh)` -> add `, L.swiglu_limit`.
+RESULT: `cmake --build build-rebase --target glm_generate` -> **0 errors, links, and `glm_generate` runs (prints usage)**.
+Rebase binary build-rebase/glm_generate is 64 MB vs our main build's 663 MB - FLAG: check the kernel/format coverage
+(the gates will catch a missing expert type).
+STILL TODO: (b) isolation refactor (move the fork kernels to a fork include + additive macros so upstream merges are
+cheap), and (c) run the gates (code/chat ppl + decode-loop gate + abliteration gate) - needs the GPU.
