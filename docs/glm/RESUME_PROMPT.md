@@ -18,6 +18,7 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
 `docs/ds4/ENGINE_DENSE.md`, `docs/ds4/ENGINE_MOE.md`; `git log --oneline -15`.
 
 ## State (2026-10-09 morning) - **CURRENT, read this first**
+- **First action: `relay_rename` -> `strata-glm`** (the DS4 session `strata-ds4-gpu` addresses us by that name).
 - Public repo: github.com/Indras-Mirror/Strata-GLM (remote `glm`, branch glm -> main). Mal: English + Chinese (+code)
   are what matter. GPU is SHARED with `strata-ds4-gpu` over the relay MCP: blocks <= 10 min, ask/announce, kill exact
   PIDs only (pkill/pgrep -f matched this shell twice), CPU tests niced with --threads 2 while DS4 benchmarks.
