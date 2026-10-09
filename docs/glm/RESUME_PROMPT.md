@@ -31,10 +31,11 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
   5.5); 50K-token prefill **229.6 tok/s**; decode at 50K depth **8.23 tok/s** (vs ~8.5 at 2K).
 - **Soft prune DONE (FINDINGS s10-s12):** GLM's sigmoid router needs penalty ~0.05 (not DS4's 0.5). Recommended:
   `--prune bench/glm-2026-10-09/prune-ezct-0.25.txt --prune-penalty 0.05 --arena-adapt --skip-file 0.15
-  --skip-file-prefill 0.15` -> decode ~9.8 tok/s (= hard prune), prefill 130-140, German +2% vs unpruned (hard +61%),
+  --skip-file-prefill 0.15 --skip-miss 0.05 --pcie 0.35` -> decode ~10.8 tok/s (hard prune 9.5), prefill 130-140, German +2% vs unpruned (hard +61%),
   code -1.7%. `--arena-admit` (heat gate) is a loss on GLM: leave off. Clean base: chat 5.547, code 3.668.
-- **Next (in order):** (1) win back the last speed: skip-miss 0.05 on top (hard + 0.05 = 10.77 tok/s), VRAM re-seed
-  after prefill, bigger chunks; gate quality on the 2000-token chat/code evals (300-token decode ppl is noise).
+- **Next (in order):** (1) more speed: chunk_prestage under arena_adapt (prefill), VRAM re-seed after prefill (elastic
+  ExpertCache shrink/grow), bigger chunks; gate quality with the 2000-token evals (chunked) + the decode-loop chat
+  gate (chain10; loop vs loop only). Prompt cache across turns (DwarfStar idea, FINDINGS s13) once GLM is served.
   (2) Fork oracle: rebuild ~/AI/llama.cpp-glm53 CPU (patched, `GLM_NO_FUSED_LID=1`) and compare indexer scoring on the
   mini fixture past 11 tokens; then the GPU chunk-vs-loop ppl gap (18.47 vs 20.46 on neutral, CPU fixture exact).
   (3) Long context deeper: prefill ~25% of 200K/500K (Mal: prove it, don't fill it) and decode at that depth; a

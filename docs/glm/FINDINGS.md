@@ -298,3 +298,27 @@ NOT measured yet: anything on the real model.
   unpruned instead of +61%, code still better than unpruned. 0.20 buys ~10% more prefill speed for another
   +3.5% on German. To win back the rest: skip-miss on VRAM misses (hard + 0.05 -> 10.77), bigger chunks, VRAM
   re-seed after prefill.
+
+## s13 (2026-10-09 17:39-17:55): PCIe share, skip-miss on top, decode-path quality gate, DwarfStar (chains 9-10)
+- **--pcie sweep** (recommended soft config, eval_code300, 64 tokens timed): 0.25 9.82 | 0.35 **9.97** | 0.45 9.12 |
+  0.55 9.86 | 0.65 9.14 tok/s. Flat within noise from 0.25 to 0.55. The PCIe DMA reads the same host RAM the CPU pool
+  reads, so moving work to PCIe slows the pool (0.45: cpu pool 77 ms for fewer experts). At 0.65 PCIe is the long pole
+  (65 ms). Keep 0.25-0.35.
+- **+ --skip-miss 0.05: 10.82 tok/s** (+10%; tier wall 74.8 vs 81.5 ms).
+- **Decode-path quality gate** (new): eval_chat (German, 2000 tokens) as a decode-loop ppl, so every token goes through
+  run() and skip-file/skip-miss act exactly as in decode (~3.5 min/run at ~9 tok/s):
+  recommended (`--skip-file 0.15 --pcie 0.35`) **5.940**, + skip-miss 0.05 **5.807**. Skip-miss costs no measurable
+  quality. Decode-loop ppl is not comparable with chunked ppl (the open chunk-vs-loop gap, s8); compare loop to loop
+  only. The 300-token loop ppls also do NOT track the CPU/PCIe split (0.55 lowest, 0.65 highest) -> few-% run noise.
+- **DwarfStar** (antirez/ds4, ~/AI/ds4-ref fc80bd6) runs GLM-5.3-Flash on Metal/CUDA/ROCm: M5 Max 128 GB, Q4_K SSD
+  streaming: prefill 121 tok/s, decode 11.9-14.9. It **refuses our GGUF** (expects 46 blocks with the MTP layer
+  inside; ours keeps MTP in a separate file; its CUDA path also has no Q3_K). Head-to-head would need its own
+  `glm53-q2` (90 GiB). Ideas taken: (1) prompt/KV cache across turns (`--kv-disk-dir`; full GLM 5.3: 16-token
+  append 30.8 -> 2.9 s). GLM's carried state is all in GlmDense's sbuf (KDA conv+S per layer, MLA kvc rows < pos,
+  ipool rows < pos/4, itail) -> a snapshot/restore is straightforward; worth it once GLM is served (glm_generate is
+  one prompt per process). (2) Prefill streaming = read layer L+1's experts while L computes: our chunk_prestage
+  does that for arena experts but is OFF with arena_adapt (soft prune) - a lever for prefill. (3) Its VRAM cache
+  "protects every hit before evicting for a miss" - n/a, ours is static with flat routing.
+- **Best config now:** `--prune prune-ezct-0.25.txt --prune-penalty 0.05 --arena-adapt --skip-file 0.15
+  --skip-file-prefill 0.15 --skip-miss 0.05 --pcie 0.35` -> decode ~10.8 tok/s (hard 25% 9.52; unpruned ~3.7),
+  prefill 130-140 tok/s, German chunked ppl +2% vs unpruned.

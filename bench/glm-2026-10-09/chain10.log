@@ -1,0 +1,19 @@
+### c10-rec-chatloop 17:46:07
+exit 0 17:50:28
+tier: gpu, 2088 resident slots, arena 58.8 GiB (6984 experts), file tier 0; load 34.3 s
+ppl: 1999 positions, mean NLL 1.78178, perplexity 5.9404
+prefill: 2000 tokens in 223.57 s = 8.95 tok/s (decode-loop prefill)
+decode : 1 tokens, 1 forward passes in 0.00 s = 1485.73 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.49
+tier ms/token: wall 0.00 (gpu hits 0.00, pcie 0.00, cpu pool 0.00)
+### c10-sm05-chatloop 17:50:28
+exit 0 17:54:44
+tier: gpu, 2086 resident slots, arena 58.8 GiB (6986 experts), file tier 0; load 41.4 s
+ppl: 1999 positions, mean NLL 1.75907, perplexity 5.8070
+prefill: 2000 tokens in 210.93 s = 9.48 tok/s (decode-loop prefill)
+decode : 1 tokens, 1 forward passes in 0.00 s = 1581.79 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.51
+tier ms/token: wall 0.00 (gpu hits 0.00, pcie 0.00, cpu pool 0.00)
+=== chain10 done 17:54:44
