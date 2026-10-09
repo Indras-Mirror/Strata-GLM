@@ -89,10 +89,16 @@ experts -> MTP ~0.9x here (memory-bound)". Plan: `ARCHITECTURE.md:78` (Strata-fi
 resident, its 288 experts through the tier, `--mtp-resident`); head at
 `/media/mal/NVME1TB/Models/GLM-5.3-Flash-RCO/mtp/GLM-5.3-Flash-MTP-Q4_K.gguf` (4.58 GB, depth-1 acceptance 70-75%).
 Strata already has `include/strata/core/{mtp,verify,coupled_draft,native_head}.hpp` + the tier's multi-token
-`gpu_run_n`. Gate with the s16 economics `(1+acceptance)/(verify+draft)` before building: 70% acceptance + a 1.8x
-verify ~= 0.94x. Cheap checks not yet run: the CURRENT decode profile (memory vs compute) at 20 tok/s, and
-`--skip-miss 0.25/0.35` (a sweep was running when this was written - see `bench/glm-2026-10-09/dec-0.25.log`,
-`dec-0.35.log`).
+`gpu_run_n`. **The skip-miss sweep is DONE** (decode, 64 tok, ctx 524288, serving flags): 0.05 -> 9.72,
+0.15 -> 20.65, 0.25 -> 24.44, **0.35 -> 28.70 tok/s** - so **30+ is reachable by skip-miss alone** (~0.4-0.5), at a
+growing quality cost that MUST be gated (skipped weight 248.9 -> 260.1/token; ppl at 0.15 was +0.21% code /
+-0.97% chat - only 0.15 has been gated so far). `bench/glm-2026-10-09/dec-0.25.log` / `dec-0.35.log`.
+**The tier profile changed with the lever**: at 20 tok/s a token is COMPUTE-bound (wall ~19 ms = gpu hits 9.17 +
+cpu pool 5.23) with the CPU/PCIe misses nearly gone (cpu 2.1%, pcie 1.1%, file tier 19) - unlike s7's
+memory-bound 8.5 tok/s, which is the case the "0.9x MTP" verdict was measured in. Re-derive the MTP economics
+from a CURRENT profile before investing. It is still a large build: load the 4.58 GB head, its own DSA layer +
+MoE + eh_proj, then draft/verify plumbing (Strata's `verify.hpp`/`coupled_draft.hpp` and the tier's `gpu_run_n`
+are the starting points).
 
 **Traps that cost real time**
 - **Never `pgrep`/`pkill -f` a pattern that also appears in your OWN command line** - it matched this shell several
