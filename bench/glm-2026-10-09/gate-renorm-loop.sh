@@ -6,7 +6,7 @@ set -u
 cd /home/mal/AI/Strata-GLM
 PY=/home/mal/AI/Strata/.venv/bin/python
 SHIM=tools/glm/serve/serve_glm.py
-CFG=tools/glm/serve/strata-glm-unc-ablated-renorm.json
+CFG=tools/glm/serve/strata-glm-unc-ablated.json   # fully ablated + skip 0.15 + --renorm-skip
 PORT=8140
 D=bench/glm-2026-10-09
 LOG=/tmp/renorm-abl-serve.log

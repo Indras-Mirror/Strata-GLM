@@ -36,11 +36,13 @@ content, **0** "LPVOID" repeats; `finish=length` only because it hit the 900-tok
 (`bench/glm-2026-10-09/renorm-loop.summary`, `renorm-abl-probe.txt`) - the s20 loop is fixed.
 
 **NEXT (in order):**
-1. Adopt `strata-glm-unc-ablated-renorm.json` for the ablated server and A/B decode tok/s at skip 0.15
-   (~20 vs the current ~15-18 with skip forced off). If it ever loops again, the levers are (a) unify the prefill/decode
-   skip rules, (b) teach the MMQ chunk path the deltas (`ds4_moe.cpp:2145-2180` builds no `plo`).
-3. **COMMIT the three changes to `glm`** (Mal's call) - the X(12) one is needed for glm to serve at all.
-4. Abliterated-model research is in FINDINGS s24 (don't re-quantize; huihui skips the experts so it's the wrong source;
+1. The ablated server config is now `strata-glm-unc-ablated.json` (skip 0.15 + `--renorm-skip`, fully ablated; the
+   separate `-ablated-renorm.json` was folded in). A/B its decode tok/s vs the old skip-0 path (~15-18 t/s). If it
+   ever loops again, the levers are (a) unify the prefill/decode skip rules, (b) teach the MMQ chunk path the deltas
+   (`ds4_moe.cpp:2145-2180` builds no `plo`).
+2. **COMMITTED, not pushed** (`1b05fa5e` code + `431a2e4f` docs): the X(12) fix, `--renorm-skip`, `lora_bake.cpp`, the
+   findings/resume docs, and the ablated-turned-fast serve config.
+3. Abliterated-model research is in FINDINGS s24 (don't re-quantize; huihui skips the experts so it's the wrong source;
    ternary expert floor ~66 GB if we ever do). Note a ppl pass is now ~7 min (arena load 236-411 s on this box).
 
 ## State (2026-10-10) - **UPSTREAM MERGED** (superseded by the block above)

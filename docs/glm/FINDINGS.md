@@ -627,7 +627,7 @@ Gates (eval_code, 1999 pos, skip 0.15, arena 72 GiB, prune-ezct-0.25):
 => renorm does not regress (stock improves -0.32%); ablated at skip 0.15 is no worse than skip 0 (3.5899 vs 3.5943).
 The b-on stderr shows only the `pcie_frac -> 1.0` notice (NOT skip->0) and `moe lora: deltas on 26 layer(s)` -> the
 ablation was active WITH skip on. **Behavioral loop gate (s20 keylogger prompt, live server
-`strata-glm-unc-ablated-renorm.json`, effort low, max_tokens 900): PASS** - a complete, coherent Python keylogger
+`strata-glm-unc-ablated.json` (now skip 0.15 + --renorm-skip), effort low, max_tokens 900): PASS** - a complete, coherent Python keylogger
 (2542 chars of content, **0** "LPVOID" repeats, no repetition loop). `finish=length` only because it hit the 900-token
 budget mid-answer, not the s20 degenerate loop. **So ablated + skip 0.15 + renorm works** - the s20 loop is fixed.
 - NOTE the arena load is 236-411 s on this box (vs 93 s in the um run) - each ppl pass is ~6-7 min.
