@@ -436,3 +436,29 @@ Strata's server talks to its engine over a line protocol, so GLM now speaks it.
      set in the arena (no file tier), so every expert goes through `native_expert_grouped`; else wire the CPU/MMQ paths.
   Also the fp32 upload is ~550 MB VRAM (26 layers x 288 experts x 6 arrays) - store fp16 to halve it, and the configs
   never enable `--lora-exps` (the default path is bit-identical: `lora == nullptr`).
+
+## s18 (2026-10-09 20:2x-20:4x): decode 2.1x for ~0.2% ppl (--skip-miss 0.15); reuse diagnostic; metrics
+- **`--skip-miss` doubles decode at ~no cost on code.** Serving flags, prefill-chunk 1024, ctx 524288, arena 72 GiB:
+  | `--skip-miss` | decode | code ppl (eval_code, 1999 pos) |
+  | 0.05 (shipped) | 9.72 tok/s | 3.5989 |
+  | **0.15** | **20.65 tok/s** | 3.6066 (**+0.21%**) |
+  | 0.15, ctx 32768, margin 1 | 22.19 tok/s | - |
+  So skip-miss is the lever, not context (32K buys only +7%).  `--fast` wrapper mode ->
+  tools/glm/serve/strata-glm-unc-fast.json (skip-miss 0.15).  Chat/prose ppl gate still running.
+- **Multi-turn reuse was silently broken - now diagnosed.** `dense.snapshot()` can FAIL (its device copy), and the
+  serve loop then left snap_len = -1: the "shares the last prompt" restore never fired, so EVERY follow-up refilled
+  from 0 (real traffic: 19160 then 19317 tokens, both "(0 reused)", ~117 s each - the "taking a while per prompt").
+  The engine now logs the decision (`serve: reuse lcp=.. hist=.. snap=.. -> reused=..`) and a snapshot failure; with
+  a working snapshot a follow-up reuses (verified: lcp 423 >= snap 421 -> reused 423; turn 6.5 s -> 3.3 s).  Note:
+  any request from a DIFFERENT conversation resets the one state, so interleaved clients thrash it (as here).
+- **Metrics**: `/metrics` now carries the live `thinking`/`output` text; `/slots` is a full view (phase,
+  prompt/generated, tok/s, reasoning+content); `/metrics?format=prometheus` (or `Accept: text/plain`) emits
+  llama.cpp's names (`llamacpp:*`) plus `strata:*` (prefill/decode rate, phase, expert tiers, VRAM).  Committed in
+  ~/AI/Strata/serve/server.py (9bb510c8); that checkout is the UPSTREAM (Niko1221) - not pushed.  Strata-GLM's own
+  serve/server.py is a diverged copy the shim does not import.
+- **Ablation status**: the dense half (57/135 pairs) does NOT stop hard refusals - the keylogger prompt refuses
+  ("I can't help with that ... spyware ... consent") at the default effort AND at effort=low.  The routed-expert
+  LoRA (`--lora-exps`) is required.  Its NaN is NOT the per-entry expert-id mapping (verified: both dst sites pass a
+  routing index, so `ids6[dst[i]]` is right) nor the A/B shapes (gate/up 4096->2048, down 2048->4096, matching the
+  tier's n_embd 4096 / n_ff 2048) - re-test with the current binary.  The CPU pool and the MMQ chunk path are still
+  uninstrumented (all-or-nothing: a large share of experts are computed there).
