@@ -28,6 +28,13 @@
 #include <cstring>
 #include <fstream>
 #include <random>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <iostream>
+#include <mutex>
+#include <sstream>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -44,6 +51,7 @@ struct Args {
     float temp = 0.0f, route_bias = 0.0f, prune_penalty = 0.0f, skip_miss = 0.0f, skip_file = 0.0f, skip_file_chunk = 0.0f, arena_admit = 0.0f;
     uint64_t seed = 1;
     std::vector<int> stop;
+    bool serve = false;              // --serve: Strata's engine line protocol on stdin/stdout (serve/server.py)
     bool ppl = false, vram_lru = false, arena_adapt = false, arena_skip = false;
     int prefill_chunk = 0;           // --prefill-chunk N: the prompt in passes of N tokens (0 = the decode loop)
     bool chunk_mmq = false, chunk_prestage = false, allow_long = false;
@@ -90,6 +98,7 @@ bool parse(int argc, char ** argv, Args & a) {
         else if (k == "--route-bias") a.route_bias = (float) std::atof(next().c_str());
         else if (k == "--vram-lru") a.vram_lru = true;
         else if (k == "--arena-adapt") a.arena_adapt = true;
+        else if (k == "--serve") a.serve = true;
         else if (k == "--arena-skip-resident") a.arena_skip = true;
         else if (k == "--prefill-chunk") a.prefill_chunk = std::atoi(next().c_str());
         else if (k == "--chunk-mmq") a.chunk_mmq = true;
@@ -104,7 +113,8 @@ bool parse(int argc, char ** argv, Args & a) {
         else if (k == "--prune-penalty") a.prune_penalty = (float) std::atof(next().c_str());
         else { std::fprintf(stderr, "glm_generate: unknown argument %s\n", k.c_str()); return false; }
     }
-    return !a.model.empty() && (!a.ids_csv.empty() || !a.ids_file.empty());
+    if (a.serve) a.vram_grow_keep = 0.0;   // the elastic cache's grow is one-shot: every request needs the chunk VRAM
+    return !a.model.empty() && (a.serve || !a.ids_csv.empty() || !a.ids_file.empty());
 }
 
 double now_ms() {
@@ -121,6 +131,34 @@ int sample(const float * logits, int n_vocab, float temp, std::mt19937_64 & rng)
     double r = u(rng);
     for (int i = 0; i < n_vocab; ++i) if ((r -= p[(size_t) i]) <= 0) return i;
     return n_vocab - 1;
+}
+
+// temperature + top-k / min-p / top-p over the top candidates (top_k 0 = the 256 best)
+int sample_p(const float * logits, int n_vocab, float temp, int top_k, float top_p, float min_p, std::mt19937_64 & rng) {
+    if (temp <= 0.0f) return (int) (std::max_element(logits, logits + n_vocab) - logits);
+    const int K = std::min(n_vocab, top_k > 0 ? top_k : 256);
+    std::vector<int> idx((size_t) n_vocab);
+    for (int i = 0; i < n_vocab; ++i) idx[(size_t) i] = i;
+    std::partial_sort(idx.begin(), idx.begin() + K, idx.end(), [&](int x, int y) { return logits[x] > logits[y]; });
+    const double mx = logits[idx[0]];
+    std::vector<double> p((size_t) K);
+    double z = 0;
+    for (int i = 0; i < K; ++i) z += (p[(size_t) i] = std::exp(((double) logits[idx[(size_t) i]] - mx) / temp));
+    int n = K;
+    if (min_p > 0.0f)
+        while (n > 1 && p[(size_t) n - 1] < (double) min_p * p[0]) --n;
+    if (top_p > 0.0f && top_p < 1.0f) {
+        double zn = 0;
+        for (int i = 0; i < n; ++i) zn += p[(size_t) i];
+        double c = 0;
+        for (int i = 0; i < n; ++i) { c += p[(size_t) i] / zn; if (c >= top_p) { n = i + 1; break; } }
+    }
+    z = 0;
+    for (int i = 0; i < n; ++i) z += p[(size_t) i];
+    std::uniform_real_distribution<double> u(0.0, z);
+    double r = u(rng);
+    for (int i = 0; i < n; ++i) if ((r -= p[(size_t) i]) <= 0) return idx[(size_t) i];
+    return idx[(size_t) n - 1];
 }
 
 }  // namespace
@@ -147,7 +185,7 @@ int main(int argc, char ** argv) {
         prompt.resize(n);
         f.read((char *) prompt.data(), (std::streamsize) (n * 4));
     }
-    if (prompt.empty()) { std::fprintf(stderr, "glm_generate: empty prompt\n"); return 2; }
+    if (prompt.empty() && !a.serve) { std::fprintf(stderr, "glm_generate: empty prompt\n"); return 2; }
 
     ggml_backend_t be = ggml_backend_init_by_type(a.backend == "cuda" ? GGML_BACKEND_DEVICE_TYPE_GPU
                                                                       : GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
@@ -338,6 +376,195 @@ int main(int argc, char ** argv) {
         if (rfile && ++rblock_n == RB) flush_routes(false);
         return true;
     };
+
+    // ---- serve mode: Strata's engine line protocol (~/AI/Strata/serve/server.py StrataEngine).  In: GEN <max_new>
+    // [key=value ...] <ids csv> | STOP | QUIT.  Out: READY <ctx> stop, RESUME <reused>, PP <read> <total> <ms> <tok/s>,
+    // T <id> per token, DONE <generated> <prompt> <prompt_ms> <decode_ms> <finish> 0 0 <reused> <hits> <lookups> 0
+    // <file blobs> 0 <prompt read>, ERR <text>.  Conversation reuse: the state is snapshotted at the end of every
+    // prompt (GlmDense::snapshot); a request that extends what was fed continues, one that shares the last prompt
+    // restores the snapshot, anything else starts over (KDA state cannot rewind further).
+    if (a.serve) {
+        const int ctxv = (int) dc.ctx;
+        std::mutex qm;
+        std::condition_variable qc;
+        std::deque<std::string> q;
+        bool eof = false;
+        std::thread([&]() {
+            std::string ln;
+            while (std::getline(std::cin, ln)) {
+                std::lock_guard<std::mutex> lk(qm);
+                q.push_back(ln);
+                qc.notify_all();
+            }
+            std::lock_guard<std::mutex> lk(qm);
+            eof = true;
+            qc.notify_all();
+        }).detach();
+        auto next_line = [&](std::string & out) -> bool {
+            std::unique_lock<std::mutex> lk(qm);
+            qc.wait(lk, [&] { return !q.empty() || eof; });
+            if (q.empty()) return false;
+            out = q.front();
+            q.pop_front();
+            return true;
+        };
+        auto stop_pending = [&]() -> bool {
+            std::lock_guard<std::mutex> lk(qm);
+            for (auto it = q.begin(); it != q.end(); ++it)
+                if (*it == "STOP") { q.erase(it); return true; }
+            return false;
+        };
+        const int NP = a.prefill_chunk;
+        std::vector<int> cids;
+        std::vector<int32_t> cids32;
+        std::vector<float> cw, crouted, last_logits((size_t) G.vocab);
+        if (NP > 0) {
+            cids.resize((size_t) NP * top_k);
+            cids32.resize((size_t) NP * top_k);
+            cw.resize((size_t) NP * top_k);
+            crouted.resize((size_t) NP * n_embd);
+        }
+        std::string ferr;
+        // the prompt ids[0, n) at positions pos0.. -> last_logits = the last one's
+        auto feed = [&](const int * ids, int n, int pos0, const std::function<void(int)> & progress) -> bool {
+            if (NP <= 0) {
+                for (int i = 0; i < n; ++i) {
+                    if (!step(ids[i], pos0 + i)) { ferr = dense.last_error(); return false; }
+                    if ((i + 1) % 64 == 0 || i + 1 == n) progress(i + 1);
+                }
+                const float * lg = nullptr;
+                int nv = 0;
+                if (!dense.logits_n(1, &lg, &nv)) { ferr = dense.last_error(); return false; }
+                std::copy(lg, lg + nv, last_logits.begin());
+                return true;
+            }
+            for (int c0 = 0; c0 < n; c0 += NP) {
+                const int m = std::min(NP, n - c0);
+                if (!dense.begin_tokens(ids + c0, m)) { ferr = dense.last_error(); return false; }
+                for (int l = 0; l < n_layer; ++l) {
+                    const bool moe = G.routed(l);
+                    const float * x = nullptr;
+                    if (!dense.attn_router_n(l, pos0 + c0, m, cids.data(), cw.data(), &x)) { ferr = dense.last_error(); return false; }
+                    if (moe) {
+                        for (int k = 0; k < m * top_k; ++k) cids32[(size_t) k] = cids[(size_t) k];
+                        if (!tier.run_chunk(l, m, cids32.data(), cw.data(), x, crouted.data())) { ferr = "tier.run_chunk refused"; return false; }
+                    }
+                    if (!dense.finish_layer_n(l, m, moe ? crouted.data() : nullptr)) { ferr = dense.last_error(); return false; }
+                }
+                if (c0 + m == n && !dense.logits_rows(m - 1, 1, last_logits.data())) { ferr = dense.last_error(); return false; }
+                progress(c0 + m);
+            }
+            tier.release_chunk();
+            return true;
+        };
+        auto is_stop = [&](int t) { return std::find(a.stop.begin(), a.stop.end(), t) != a.stop.end(); };
+        std::vector<int> hist;   // the ids the state has seen, in order
+        int snap_len = -1;       // hist's length at the snapshot (the end of the last prompt)
+        std::printf("INFO ctx=%d experts_vram=%lld arena_experts=%lld\n", ctxv, (long long) tier.resident(),
+                    (long long) tier.arena_experts());
+        std::printf("READY %d stop\n", ctxv);
+        std::fflush(stdout);
+        std::fprintf(stderr, "serve: ready (ctx %d, prefill chunk %d)\n", ctxv, NP);
+        std::string line;
+        while (next_line(line)) {
+            if (line == "QUIT") break;
+            if (line == "STOP" || line.empty()) continue;
+            if (line.rfind("GEN ", 0) != 0) { std::printf("ERR unsupported command\n"); std::fflush(stdout); continue; }
+            std::istringstream ss(line);
+            std::string w, csv;
+            int max_new = 0;
+            float temp = a.temp, top_p = 1.0f, min_p = 0.0f;
+            int top_k = 0;
+            ss >> w >> max_new;
+            while (ss >> w) {
+                const size_t eq = w.find('=');
+                if (eq == std::string::npos) { csv = w; continue; }
+                const std::string k = w.substr(0, eq), v = w.substr(eq + 1);
+                if (k == "temperature") temp = (float) std::atof(v.c_str());
+                else if (k == "top_p") top_p = (float) std::atof(v.c_str());
+                else if (k == "top_k") top_k = std::atoi(v.c_str());
+                else if (k == "min_p") min_p = (float) std::atof(v.c_str());
+                else if (k == "seed") rng.seed((uint64_t) std::atoll(v.c_str()));
+            }
+            std::vector<int> ids = csv.empty() ? std::vector<int>() : parse_csv(csv);
+            if (ids.empty()) { std::printf("ERR empty prompt\n"); std::fflush(stdout); continue; }
+            if ((int64_t) ids.size() + std::max(0, max_new) > ctxv) {
+                std::printf("ERR prompt (%zu) + max tokens (%d) exceed the context (%d)\n", ids.size(), max_new, ctxv);
+                std::fflush(stdout);
+                continue;
+            }
+            size_t lcp = 0;
+            while (lcp < hist.size() && lcp < ids.size() && hist[lcp] == ids[lcp]) ++lcp;
+            int reused = 0;
+            if (!hist.empty() && lcp == hist.size() && lcp < ids.size()) reused = (int) lcp;
+            else if (snap_len > 0 && lcp >= (size_t) snap_len && (size_t) snap_len < ids.size() && dense.restore()) {
+                hist.resize((size_t) snap_len);
+                reused = snap_len;
+            } else {
+                dense.reset();
+                hist.clear();
+                snap_len = -1;
+            }
+            if (reused > 0) { std::printf("RESUME %d\n", reused); std::fflush(stdout); }
+            tier.reset_stats();
+            const double tp0 = now_ms();
+            const int total = (int) ids.size();
+            const bool ok = feed(ids.data() + reused, total - reused, reused, [&](int done) {
+                const double ms = now_ms() - tp0;
+                std::printf("PP %d %d %.0f %.1f\n", reused + done, total, ms, 1000.0 * done / std::max(ms, 1e-9));
+                std::fflush(stdout);
+            });
+            if (!ok) {
+                std::printf("ERR prefill failed: %s\n", ferr.c_str());
+                std::fflush(stdout);
+                dense.reset();
+                hist.clear();
+                snap_len = -1;
+                continue;
+            }
+            hist = ids;
+            if (dense.snapshot()) snap_len = (int) hist.size();
+            const double prompt_ms = now_ms() - tp0;
+            std::fprintf(stderr, "serve: prompt %d tokens (%d reused) in %.2f s = %.1f tok/s\n", total, reused,
+                         prompt_ms / 1000.0, 1000.0 * (total - reused) / std::max(prompt_ms, 1e-9));
+            tier.reset_stats();
+            const double td0 = now_ms();
+            int gen = 0, pos = total;
+            const char * finish = "length";
+            while (gen < max_new || max_new <= 0) {
+                if (stop_pending()) { finish = "cancel"; break; }
+                const float * lg = last_logits.data();
+                int nv = (int) G.vocab;
+                if (gen > 0 && !dense.logits_n(1, &lg, &nv)) { ferr = dense.last_error(); finish = "error"; break; }
+                const int tok = sample_p(lg, nv, temp, top_k, top_p, min_p, rng);
+                std::printf("T %d\n", tok);
+                std::fflush(stdout);
+                ++gen;
+                if (is_stop(tok)) { finish = "stop"; break; }
+                if ((max_new > 0 && gen >= max_new) || pos + 1 >= ctxv) break;
+                if (!step(tok, pos)) { ferr = dense.last_error(); finish = "error"; break; }
+                hist.push_back(tok);
+                ++pos;
+            }
+            const double dec_ms = now_ms() - td0;
+            const ds4::Ds4MoeStats st = tier.stats();
+            if (std::strcmp(finish, "error") == 0) {
+                std::fprintf(stderr, "serve: decode failed: %s\n", ferr.c_str());
+                dense.reset();
+                hist.clear();
+                snap_len = -1;
+                finish = "length";
+            }
+            std::fprintf(stderr, "serve: %d tokens in %.2f s = %.2f tok/s (%s)\n", gen, dec_ms / 1000.0,
+                         1000.0 * std::max(0, gen - 1) / std::max(dec_ms, 1e-9), finish);
+            std::printf("DONE %d %d %.1f %.1f %s 0 0 %d %lld %lld 0 %lld 0 %d\n", gen, total, prompt_ms, dec_ms, finish,
+                        reused, (long long) st.hits, (long long) st.lookups(), (long long) st.file_tier, total - reused);
+            std::fflush(stdout);
+        }
+        tier.close();
+        ggml_backend_free(be);
+        return 0;
+    }
 
     // ---- prefill (decode loop over the prompt)
     tier.reset_stats();

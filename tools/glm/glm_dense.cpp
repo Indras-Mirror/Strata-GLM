@@ -282,6 +282,10 @@ struct GlmDense::Impl {
     int64_t in_cap = -1;
     bool in_dirty = true;
     int next_pos = 0;                    // the position the recurrent state expects next
+    ggml_context * snap_ctx = nullptr;   // snapshot(): copies of the recurrent state tensors
+    ggml_backend_buffer_t snap_buf = nullptr;
+    std::vector<std::pair<ggml_tensor *, ggml_tensor *>> snap_pairs;   // (live, copy)
+    int snap_pos = -1;
 
     int64_t o_blk = 0, o_ids_off = 0, o_wts_off = 0;
 
@@ -379,6 +383,8 @@ struct GlmDense::Impl {
         for (ggml_gallocr_t a : allo_head) if (a && a != allo_big) ggml_gallocr_free(a);
         if (allo_rows) ggml_gallocr_free(allo_rows);
         if (allo_big) ggml_gallocr_free(allo_big);
+        if (snap_buf) ggml_backend_buffer_free(snap_buf);
+        if (snap_ctx) ggml_free(snap_ctx);
         if (sbuf) ggml_backend_buffer_free(sbuf);
         if (ibuf) ggml_backend_buffer_free(ibuf);
         if (obuf) ggml_backend_buffer_free(obuf);
@@ -928,7 +934,41 @@ void GlmDense::reset() {
     ggml_backend_buffer_clear(im.sbuf, 0);
     im.next_pos = 0;
     im.in_pos = -1;
+    im.snap_pos = -1;
 }
+
+bool GlmDense::snapshot() {
+    Impl & im = *p_;
+    if (!im.snap_buf) {
+        std::vector<ggml_tensor *> live;
+        for (Impl::Layer & L : im.ly) {
+            if (L.kda) { live.push_back(L.S); for (ggml_tensor * c : L.conv) live.push_back(c); }
+            else if (L.itail) live.push_back(L.itail);
+        }
+        ggml_init_params ip = { ggml_tensor_overhead() * (live.size() + 1), nullptr, true };
+        im.snap_ctx = ggml_init(ip);
+        if (!im.snap_ctx) { im.err = "snapshot: ggml_init failed"; return false; }
+        for (ggml_tensor * t : live) im.snap_pairs.emplace_back(t, ggml_dup_tensor(im.snap_ctx, t));
+        im.snap_buf = ggml_backend_alloc_ctx_tensors_from_buft(im.snap_ctx, ggml_backend_get_default_buffer_type(im.backend));
+        if (!im.snap_buf) { im.err = "snapshot: cannot allocate the state copy"; return false; }
+    }
+    for (auto & pr : im.snap_pairs) ggml_backend_tensor_copy(pr.first, pr.second);
+    ggml_backend_synchronize(im.backend);
+    im.snap_pos = im.next_pos;
+    return true;
+}
+
+bool GlmDense::restore() {
+    Impl & im = *p_;
+    if (im.snap_pos < 0) { im.err = "restore: no snapshot"; return false; }
+    for (auto & pr : im.snap_pairs) ggml_backend_tensor_copy(pr.second, pr.first);
+    ggml_backend_synchronize(im.backend);
+    im.next_pos = im.snap_pos;
+    im.in_pos = -1;
+    return true;
+}
+
+int GlmDense::snapshot_pos() const { return p_->snap_pos; }
 
 bool GlmDense::begin_tokens(const int * tids, int n) {
     Impl & im = *p_;

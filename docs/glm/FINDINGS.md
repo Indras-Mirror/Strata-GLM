@@ -367,3 +367,32 @@ NOT measured yet: anything on the real model.
   --vram-margin 8 --vram-grow 1 --arena-skip-resident --arena-gib 72 --slots auto` -> prefill ~220-230 tok/s,
   decode ~9.8 tok/s (session start: 2.1 tok/s prefill-loop / 3.7 decode unpruned; this morning hard prune 175 / 9.3
   with German +61%).
+
+## s16 (2026-10-09 evening): serving GLM behind Strata's API server + Quetza wrapper - BUILT, NOT YET WORKING END TO END
+Why: Strata (~/AI/Strata) serves only Qwen3.8-Flash-Next; GLM/DS4 have their own engines, which were one-shot CLIs.
+Strata's server talks to its engine over a line protocol, so GLM now speaks it.
+- **Engine:** `glm_generate --serve` (tools/glm/glm_generate.cpp, serve block before the prefill): stdin reader
+  thread; `GEN <max_new> [temperature= top_p= top_k= min_p= seed=] <ids csv>` -> `RESUME n`, `PP read total ms tok/s`,
+  `T id`, `DONE gen prompt prompt_ms decode_ms finish 0 0 reused hits lookups 0 file 0 read`; `STOP` mid-decode
+  (finish=cancel); `QUIT`. Sampler `sample_p` (temp/top-k/min-p/top-p). Stops on `--stop` ids.
+- **Multi-turn reuse:** `GlmDense::snapshot()/restore()/snapshot_pos()` copy only the recurrent state (KDA S + conv,
+  MLA itail) + position; MLA latent rows and complete indexer pools below the position are never rewritten, so the
+  rewind is exact. Snapshot at the end of every prompt; a request that extends what was fed continues, one that
+  shares the last prompt restores the snapshot, else reset. Untested on the real model.
+- `--serve` forces `--vram-grow` off (the elastic grow is one-shot; every request's prefill needs the chunk VRAM).
+  TODO: shrink the cache back before each chunked prefill to keep the grow in serve mode.
+- **Frontend shim** tools/glm/serve/: `export_tokenizer.py` (GGUF -> vocab.json/merges.txt/token_type.json/
+  chat_template.jinja; exported to /media/mal/NVME1TB/Models/GLM-5.3-Flash-RCO/tokenizer), `glm_tok.py` (Strata BPE +
+  llama.cpp CHATGLM4 pre-split; **verified exact** on bench/glm-2026-10-08/prompts neutral + chat .ids),
+  `serve_glm.py` (runs Strata's serve.server with GLM's tokenizer, stop ids <|user|>/<|observation|>/<|endoftext|>,
+  GLM tool calls `<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value></tool_call>`, tool-arg streaming off),
+  `glm-engine.sh` (memguard's protections in the FOREGROUND - memguard.sh backgrounds its command, which gives it
+  /dev/null as stdin; holds ds4-gpu.lock while the server runs), configs `strata-glm-unc.json` (abliteration LoRA,
+  dense half only; port 8140) / `strata-glm.json` (stock, 8141): soft prune best config, ctx 524288, chunk 1024,
+  margin 5.5, sampling temperature 1.0 / top_p 0.95.
+- **Wrapper:** `~/.local/bin/strata-glm-quetza [--stock] [--port=N]` (same shape as strata-quetza).
+- **Status / open:** first server start died silently right after the LoRA line (no error in the engine log, server
+  exited). Standalone `glm-engine.sh --serve <args> < /dev/null` was being run to get the exit code (suspects: VRAM
+  at ctx 524288 + chunk 1024 + LoRA, systemd scope, or the stdin reader). Next: find that, then curl
+  /v1/messages (plain + a tool call + a 2-turn reuse check), then Quetza. Same work for DS4 (`ds4_generate --serve`)
+  was asked by Mal; strata-ds4-gpu was asked over the relay whether it builds it in Strata-DS4.

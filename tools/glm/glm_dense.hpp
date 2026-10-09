@@ -99,6 +99,12 @@ public:
     void set_route_bias(int il, const float * bias);
     /// Forget every position (KDA state, conv state, MLA cache rows are simply overwritten from position 0 on).
     void reset();
+    /// Conversation reuse (serve mode): save the recurrent state - KDA S + conv states, the indexer's tail carry -
+    /// and the position.  MLA latent rows and complete indexer pools below that position are never rewritten, so
+    /// restore() rewinds the model exactly to it (~70 MB device copies, not the whole latent cache).
+    bool snapshot();
+    bool restore();
+    int snapshot_pos() const;   ///< -1: none
 
     const float * tap_l_out(int il) const;   ///< [n_embd * hc] of the last token of the last pass (gate_taps)
     const std::string & last_error() const;

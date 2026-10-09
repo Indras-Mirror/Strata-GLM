@@ -29,6 +29,11 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
   --skip-miss 0.10, +4% ppl). Hard prune hurts uncalibrated languages (German -18..-29%).
 - **Long context WORKS (FINDINGS s9):** `--ctx 524288` allocates (~6 GB latent cache, 734 VRAM slots left at margin
   5.5); 50K-token prefill **229.6 tok/s**; decode at 50K depth **8.23 tok/s** (vs ~8.5 at 2K).
+- **IN PROGRESS (FINDINGS s16): serving + Quetza wrapper `~/.local/bin/strata-glm-quetza`.** Engine `glm_generate
+  --serve` + GlmDense snapshot/restore + tools/glm/serve/ (tokenizer verified exact, Strata server shim, configs,
+  foreground memguard launcher). First start died silently after the LoRA line - debug that first (run
+  `tools/glm/serve/glm-engine.sh --serve $(args of strata-glm-unc.json) < /dev/null`, check exit code / VRAM at ctx
+  524288), then test /v1/messages + tool call + 2-turn reuse. Then the same for DS4 (coordinate with strata-ds4-gpu).
 - **Best real-use config (FINDINGS s15):** `--prune bench/glm-2026-10-09/prune-ezct-0.25.txt --prune-penalty 0.05
   --arena-adapt --skip-file 0.15 --skip-file-prefill 0.15 --skip-miss 0.05 --pcie 0.35 --prefill-chunk 2048
   --chunk-mmq --vram-margin 8 --vram-grow 1 --arena-skip-resident --arena-gib 72 --slots auto` -> prefill ~220-230,
