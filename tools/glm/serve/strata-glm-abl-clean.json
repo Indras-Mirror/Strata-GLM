@@ -38,9 +38,9 @@
  ],
  "cwd": "/home/mal/AI/Strata-GLM",
  "tokenizer": "/media/mal/NVME1TB/Models/GLM-5.3-Flash-RCO/tokenizer",
- "model_name": "glm-5.3-flash-strata-ablated-full",
- "log": "/tmp/strata-glm-unc-ablated.log",
- "port": 8140,
+ "model_name": "glm-5.3-flash-strata-ablated-clean",
+ "log": "/tmp/strata-glm-abl-clean.log",
+ "port": 8142,
  "gpu": 0,
  "sampling": {
   "temperature": 1.0,

@@ -50,39 +50,28 @@ plus `strata:*` (prefill/decode rate, phase, expert tiers, VRAM/RAM/GPU). They l
 - that checkout's remote is the UPSTREAM **Niko1221/Strata**, so **do not push there**; the GLM shim imports it.
 To put them in Mal's repo, port into `Strata-GLM/serve/server.py` (a diverged copy) and repoint the shim.
 
-**Abliteration (FINDINGS s17, s19).** The adapter's 135 A/B pairs = 57 "solo" (attn_output 30, ffn_down_shexp 27,
-applied in the ggml graph) + 78 routed-expert (`ffn_{gate,up,down}_exps`, layers 3-28 x 288). Dense-only does NOT
-stop hard refusals (the keylogger prompt refuses crisply). `--lora --lora-exps` now applies the expert deltas on
-BOTH decode (`gpu_run`) and chunk (`gpu_run_chunk`) - three bugs fixed: (i) the down correction read the float `h`,
-but the default SwiGLU path writes only `hq` (fix `sw_v1 = v1 || (lora && lora->a_d)`); (ii) the chunk path
-silently did nothing (`kMaxEnt` is 32, a 1024-token chunk has 8192 entries -> dedicated `gp.c_exp`); (iii) the
-config's `--chunk-mmq` sent prefill through the UNINSTRUMENTED MMQ path -> un-ablated prefill + ablated decode =
-broken model (benign prompts looped). `--lora-exps` now forces `chunk_mmq=false` + `pcie_frac=1.0` (every miss on
-the one instrumented path; a file-tier expert is CPU-computed and would NOT be ablated - keep the set in the arena).
-Verified: code ppl 3.5628 -> 3.5967 (+0.95%), benign prompts normal, logits max|d| 1.61 vs dense-only.
-**OPEN (the real problem): the keylogger prompt LOOPS** - ~8-10k chars of reasoning, never answers, at every budget
-and through the harness (`QuetzaCodetl -p`: "exceeded the 1500 output token maximum" after 14m21s). The routed
-deltas change the refusal behaviour (dense-only refused crisply) but give a spiral, not compliance.
-
-**GETTING THE ABLATION WORKING PROPERLY (Mal's ask - treat the loop as a BUG, not "the adapter is weak")**
-The plumbing is done and numerically verified; the symptom is a deliberation loop on harmful prompts. A good
-abliteration should comply, so work it as unresolved. Cheapest first:
-1. **Sampling.** The server defaults are temperature 1.0 / top_p 0.95 with NO repetition penalty, no top_k, no min_p -
-   a looping decoder is the classic symptom. Try `repetition_penalty` ~1.05-1.15, `top_k` 40-64, `min_p` ~0.05, and a
-   lower temperature. `glm_generate`'s sampler already takes top_k/top_p/min_p; the server forwards sampling keys
-   (`sampling_keys()` in serve/server.py) - check which it passes and add what is missing.
-2. **Compare with the reference.** `~/AI/llama.cpp-glm53` is the neuralll/GLM fork (LoRA + GLM5Next). Run the SAME
-   adapter + prompt there: if the fork also loops, the adapter/method is the cause; if it complies, our application
-   is still wrong -> bisect layer ranges, gate vs up, and the `h` path.
-3. **Layer coverage.** 26 expert layers applied at once, or should the adapter target a subset (abliterations usually
-   name specific layers)? Try L15-28 only and compare text + ppl.
-4. **Swap check.** Gate and up are separate modules: confirm `A_g/B_g` are not swapped with `A_u/B_u` (that would
-   change the SwiGLU input asymmetrically). `GLM_LORA_NO_GU` / `GLM_LORA_NO_DOWN` isolate each correction.
-5. **Numerical gate for any change:** code ppl dense-only 3.5628 vs dense+exps 3.5967 (+0.95%) is the known-good
-   baseline (chunk path WITHOUT `--chunk-mmq`, which is forced for lora-exps). A large jump means the change damaged
-   the model.
-6. **Try other refusal prompts** (profanity / roast / violence-fiction / drugs) to see whether the loop is specific
-   to the keylogger prompt or general; and a much larger budget (4-8k) to see whether it ever terminates.
+**Abliteration (FINDINGS s17, s19, s20) - WORKING.** The adapter's 135 A/B pairs = 57 "solo" (attn_output 30,
+ffn_down_shexp 27, applied in the ggml graph) + 78 routed-expert (`ffn_{gate,up,down}_exps`, layers 3-28 x 288; the
+README confirms the gate/up factors are structural ZEROS - only routed/shared down_proj + o_proj matter, and
+alpha=1/r=1 so there is no scale to apply). `--lora --lora-exps` applies the deltas on BOTH decode (`gpu_run`) and the
+non-MMQ chunk path. FOUR bugs now fixed: (i) the down correction read the float `h` the default SwiGLU path never
+writes (`sw_v1 = v1 || (lora && lora->a_d)`); (ii) the chunk path silently did nothing (`kMaxEnt`=32 vs 8192 entries ->
+dedicated `gp.c_exp`); (iii) `--chunk-mmq` sent prefill through the UNINSTRUMENTED MMQ path (un-ablated prefill +
+ablated decode = broken model); (iv) **THE LOOP - `--skip-miss`/`--skip-file` drop a low-weight expert's read on the
+miss path, and a dropped expert loses its delta, so the ablation stops being all-or-nothing and the model degenerates
+into a repetition loop.** Matched A/B (effort=low, temp 0.6, top_k 20, rep 1.05): skip 0.15 -> "from ctypes import
+LPVOID, LPVOID, ..." x107, finish=length, no answer; skip 0 -> finish=stop, 6740 chars, a COMPLETE coherent keylogger.
+`--lora-exps` now forces `chunk_mmq=false`, `pcie_frac=1.0` AND `skip_miss=skip_file=skip_file_chunk=0`.
+Verified: code ppl 3.5628 -> 3.5967 (+0.95%); benign prompts normal; **the keylogger prompt now COMPLIES with a
+complete, coherent answer and terminates** (the stock model refuses it with a clean refusal trajectory; the ablated
+one does not).
+**Caveat:** the `skip -> 0` guard is a SOURCE edit that is compile-verified but NOT yet in the built binary - the
+ds4 session held the GPU lock. The CONFIG `tools/glm/serve/strata-glm-unc-ablated.json` already has the skip flags at
+0, which fixes it with the CURRENT binary; rebuild `glm_generate` (`cmake --build build-glm-gpu --target glm_generate`)
+in the next GPU-free window. **Cost:** the ablated config cannot use skip-miss, so it decodes at the pre-skip rate
+(~15-18 tok/s in these probes) - correctness over speed. **Still untested:** the other refusal categories, adapter v1,
+and the reference cross-check (`~/AI/llama.cpp-glm53` glm5next LoRA on the same GGUF+adapter - the way to prove our
+application matches upstream).
 
 **30+ tok/s = MTP - and the prior evidence says be careful.** `FINDINGS s7`: "a 2-token verify touches 15.2 distinct
 experts -> MTP ~0.9x here (memory-bound)". Plan: `ARCHITECTURE.md:78` (Strata-fied MTP: the block's dense part

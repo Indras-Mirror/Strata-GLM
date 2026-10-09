@@ -319,6 +319,15 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "lora-exps: pcie_frac -> 1.0 (the routed-expert deltas are applied by the GPU grouped "
                              "path; a file-tier expert is computed by the CPU pool and would NOT be ablated - keep "
                              "the whole routed set in the arena, e.g. --prune + --arena-gib 72)\n");
+        // The skip heuristics drop a low-weight expert READ on the miss path - a dropped expert contributes nothing
+        // AND loses its delta, so the ablation stops being all-or-nothing (same failure mode as the MMQ chunk above:
+        // the model degenerates into repetition loops, e.g. "import LPVOID, LPVOID, ..." and never terminates).
+        // Force them off: every routed expert must be ablated or none of it.
+        if (mc.skip_miss > 0.0f || mc.skip_file > 0.0f || mc.skip_file_chunk > 0.0f) {
+            mc.skip_miss = mc.skip_file = mc.skip_file_chunk = 0.0f;
+            std::fprintf(stderr, "lora-exps: skip-miss/skip-file -> 0 (a skipped expert loses its delta; the "
+                                 "ablation must be all-or-nothing or the model loops)\n");
+        }
     }
     if (mc.saliency && a.prefill_chunk <= 0) { std::fprintf(stderr, "glm_generate: --saliency needs --prefill-chunk\n"); return 2; }
     // --prune FILE: "layer expert" lines; those experts are never routed (selection bias -1e30, REAP-style pruning)
