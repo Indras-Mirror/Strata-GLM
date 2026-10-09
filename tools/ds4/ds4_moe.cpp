@@ -166,6 +166,10 @@ struct Gpu {
     void *m_gu = nullptr, *m_h = nullptr, *m_xg = nullptr, *m_xu = nullptr, *m_xd = nullptr, *m_bnd = nullptr,
          *m_iota = nullptr;
     std::vector<int8_t> m_ok;
+    /// Routed-expert LoRA (Ds4MoeConfig::lora): per-layer device deltas (all-null = off) + the per-entry expert ids
+    /// the grouped path's correction kernels read (`d_ent_exp`, one int32 per entry, kMaxEnt long).
+    std::vector<strata::kernels::NativeExpertLora> lora;
+    void* d_ent_exp = nullptr;
 #if defined(DS4_MOE_MMQ)
     /// Created once and never destroyed: a binary that also links ggml-cuda (mimo_generate's dense backend) resolves
     /// ~ggml_backend_cuda_context to ggml-cuda's real one, which segfaults on the context strata_mmq built.
@@ -201,6 +205,12 @@ struct Gpu {
             if (c_used[i]) cudaEventDestroy(c_used[i]);
         }
         if (s_cp) cudaStreamDestroy(s_cp);
+        for (auto& lo : lora) {   // the per-layer deltas (null when the layer carries none)
+            for (void* p : {(void*) lo.a_g, (void*) lo.b_g, (void*) lo.a_u, (void*) lo.b_u, (void*) lo.a_d, (void*) lo.b_d})
+                if (p) cudaFree(p);
+            lo = strata::kernels::NativeExpertLora();
+        }
+        if (d_ent_exp) cudaFree(d_ent_exp);
         free_mmq();
         cache.reset();
         arena.close();
@@ -756,6 +766,35 @@ bool Ds4MoeTier::init(const Ds4MoeGeom& geom, Ds4BlobSource* blobs, const Ds4Moe
     for (int i = 0; i < 4; ++i) ck(cudaEventCreate(&gp.ev[i]), "event");
     ck(cudaMallocHost((void**) &gp.h_x, (size_t) kMaxTok * H4), "h_x");
     ck(cudaMallocHost(&gp.h_parts, (size_t) kMaxEnt * H4), "h_parts");
+    // Routed-expert LoRA (GLM abliteration): upload each layer's expert deltas once; an all-null host entry stays
+    // null, so the grouped path is bit-identical to the plain one on layers without deltas.  d_ent_exp carries the
+    // per-entry expert ids the correction kernels read; it is refreshed at every grouped call.
+    ck(cudaMalloc(&gp.d_ent_exp, sizeof(int32_t) * kMaxEnt), "d_ent_exp");
+    gp.lora.assign((size_t) geom.n_layers, strata::kernels::NativeExpertLora());
+    if (cfg.lora) {
+        const int64_t ne = geom.n_experts;
+        auto upl = [&](const float* src, int64_t cols) -> const float* {
+            if (!src || ne <= 0 || cols <= 0) return nullptr;
+            float* d = nullptr;
+            ck(cudaMalloc(&d, sizeof(float) * (size_t) (ne * cols)), "lora");
+            ck(cudaMemcpy(d, src, sizeof(float) * (size_t) (ne * cols), cudaMemcpyHostToDevice), "lora up");
+            return d;
+        };
+        int n_layers_lora = 0;
+        for (int64_t l = 0; l < geom.n_layers; ++l) {
+            const Ds4MoeLoraHost& hh = cfg.lora[l];
+            if (!hh.a_g && !hh.a_u && !hh.a_d) continue;
+            strata::kernels::NativeExpertLora& lo = gp.lora[(size_t) l];
+            lo.a_g = upl(hh.a_g, geom.n_embd); lo.b_g = upl(hh.b_g, geom.n_ff);
+            lo.a_u = upl(hh.a_u, geom.n_embd); lo.b_u = upl(hh.b_u, geom.n_ff);
+            lo.a_d = upl(hh.a_d, geom.n_ff);   lo.b_d = upl(hh.b_d, geom.n_embd);
+            lo.n_experts = hh.n_experts > 0 ? hh.n_experts : ne;
+            lo.ent_exp = (const int32_t*) gp.d_ent_exp;
+            ++n_layers_lora;
+        }
+        std::fprintf(stderr, "moe lora: routed-expert deltas on %d layer(s) (n_experts %lld, n_embd %lld, n_ff %lld)\n",
+                     n_layers_lora, (long long) ne, (long long) geom.n_embd, (long long) geom.n_ff);
+    }
     if (cfg.pf_b > 0) {
         ck(cudaStreamCreateWithFlags(&gp.s_pf, cudaStreamNonBlocking), "pf stream");
         ck(cudaMalloc(&gp.d_pf, (size_t) Ds4MoeConfig::kMaxPf * (size_t) im_->blob), "d_pf");
@@ -1295,10 +1334,24 @@ bool gpu_run(Ds4MoeImpl& im, int64_t layer, const int32_t* ids6, const float* w6
         ck(cudaMemcpyAsync(gp.d_ngroups, &one, sizeof(int32_t), cudaMemcpyHostToDevice, gp.s), "ngroups");
         ck(cudaMemcpyAsync(gp.d_ent_dst, dst.data(), sizeof(int32_t) * n, cudaMemcpyHostToDevice, gp.s), "ent_dst");
         ck(cudaMemcpyAsync(gp.d_ent_tok, tok.data(), sizeof(int32_t) * n, cudaMemcpyHostToDevice, gp.s), "ent_tok");
+        // routed-expert LoRA: the per-entry expert id (dst[i] is a routing index, ids6 its expert) the correction reads
+        strata::kernels::NativeExpertLora lo;
+        const strata::kernels::NativeExpertLora* plo = nullptr;
+        if (layer < (int64_t) gp.lora.size() && gp.lora[(size_t) layer].a_g) {
+            std::vector<int32_t> exp((size_t) n);
+            for (int i = 0; i < n; ++i) exp[(size_t) i] = ids6[dst[(size_t) i]];
+            ck(cudaMemcpyAsync(gp.d_ent_exp, exp.data(), sizeof(int32_t) * n, cudaMemcpyHostToDevice, gp.s), "ent_exp");
+            lo = gp.lora[(size_t) layer];
+            lo.x = (const float*) gp.d_x;
+            lo.x_stride = (int64_t) H;
+            lo.ent_lo = 0;
+            lo.ent_hi = n;
+            plo = &lo;
+        }
         strata::kernels::native_expert_grouped(GL, (const unsigned long long*) gp.d_grp_ptr,
                                               (const int32_t*) gp.d_grp_start, (const int32_t*) gp.d_ngroups,
                                               (const int32_t*) gp.d_ent_dst, (const int32_t*) gp.d_ent_tok,
-                                              kMaxParts, n, gp.d_xq, gp.d_scratch, (float*) gp.d_parts, gp.s, n);
+                                              kMaxParts, n, gp.d_xq, gp.d_scratch, (float*) gp.d_parts, gp.s, n, plo);
         (void) w;
     };
 
@@ -2054,14 +2107,21 @@ bool gpu_run_chunk(Ds4MoeImpl& im, int64_t layer, int n, const int32_t* ids, con
             }
     }
     std::vector<int32_t> dst((size_t) NE), tok((size_t) NE), fill(first.begin(), first.end() - 1);
+    const bool lora_on = layer < (int64_t) gp.lora.size() && gp.lora[(size_t) layer].a_g != nullptr &&
+                         NE <= (int64_t) kMaxEnt;   // d_ent_exp capacity
+    std::vector<int32_t> exp;
+    if (lora_on) exp.resize((size_t) NE);
     for (int64_t j = 0; j < NE; ++j) {
         const int32_t p = fill[(size_t) ids[j]]++;
         dst[(size_t) p] = (int32_t) j;
         tok[(size_t) p] = (int32_t) (j / K);
+        if (lora_on) exp[(size_t) p] = ids[j];
     }
     // entry arrays sorted by expert: uploaded once; each launch passes its groups' slices via grp_start offsets
     ck(cudaMemcpyAsync(gp.c_dst, dst.data(), sizeof(int32_t) * (size_t) NE, cudaMemcpyHostToDevice, gp.s), "c_dst");
     ck(cudaMemcpyAsync(gp.c_tokv, tok.data(), sizeof(int32_t) * (size_t) NE, cudaMemcpyHostToDevice, gp.s), "c_tok");
+    if (lora_on)   // routed-expert LoRA: the expert of each (sorted) entry, for the correction kernels
+        ck(cudaMemcpyAsync(gp.d_ent_exp, exp.data(), sizeof(int32_t) * (size_t) NE, cudaMemcpyHostToDevice, gp.s), "c_exp");
 
     // ---- activations ----
     ck(cudaMemcpyAsync(gp.c_x, x_host, (size_t) n * (size_t) H * 4, cudaMemcpyHostToDevice, gp.s), "c_x h2d");
@@ -2168,10 +2228,20 @@ bool gpu_run_chunk(Ds4MoeImpl& im, int64_t layer, int n, const int32_t* ids, con
             cudaEventCreate(&e1);
             cudaEventRecord(e0, gp.s);
         }
+        strata::kernels::NativeExpertLora lo;
+        const strata::kernels::NativeExpertLora* plo = nullptr;
+        if (lora_on) {
+            lo = gp.lora[(size_t) layer];
+            lo.x = (const float*) gp.c_x;
+            lo.x_stride = (int64_t) H;
+            lo.ent_lo = lstart.front();
+            lo.ent_hi = lstart.back();
+            plo = &lo;
+        }
         strata::kernels::native_expert_grouped(GL, (const unsigned long long*) gp.c_ptr, (const int32_t*) gp.c_start,
                                               (const int32_t*) gp.c_ng, (const int32_t*) gp.c_dst,
                                               (const int32_t*) gp.c_tokv, ng, NE, gp.c_xq, gp.c_scratch,
-                                              (float*) gp.c_parts, gp.s, ng);
+                                              (float*) gp.c_parts, gp.s, ng, plo);
         if (prof) {
             cudaEventRecord(e1, gp.s);
             kev.emplace_back(e0, e1);

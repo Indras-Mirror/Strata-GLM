@@ -407,3 +407,32 @@ Strata's server talks to its engine over a line protocol, so GLM now speaks it.
   on 8141) is written and its endpoint verified by curl, but NOT yet launched as a full Quetza session.
 - **DS4:** `ds4_generate --serve` does NOT exist yet in `~/AI/Strata-DS4` (grepped 2026-10-09 18:5x); that tree is
   the `strata-ds4-gpu` session's - do not edit it. Relay ask pending (no peer connected at 18:5x).
+
+## s17 (2026-10-09 19:10-22:25): dense abliteration verified; routed-expert LoRA (WIP, NOT working)
+- **Dense-only abliteration is active and looks sufficient behaviorally.** The adapter (`gcsa-abliterix v2`) has 135
+  A/B pairs; GlmDense applies the 57 "solo" ones (attn_output 30, ffn_down_shexp 27). Same prompt +- adapter moves the
+  first-token logits **max|d| 2.52, mean|d| 0.40** (same argmax) - so the dense half is live on the real model.
+- **Refusal battery** (bench/glm-2026-10-09/ablate_probe.py): uncensored server **6/6 complied, 0 refused**
+  (profanity / roast / violence / crime / drugs / controversial-idea). Caveat: no stock baseline was run (time), so
+  this measures "the unc model does not refuse" - it does not yet prove the base refuses. Pass `reasoning_effort: low`
+  (chat_template_kwargs): the default `Reasoning Effort: max` spent >1024 tokens thinking on the roast prompt and never
+  reached an answer (1 earlier probe came back UNRESOLVED for that reason).
+- **Metrics parity: already a superset of llama.cpp.** `/metrics` = engine facts (experts_vram, arena_experts,
+  max_context), live request state, cumulative totals, GPU util/temp/power/PCIe gen+width, a history ring,
+  conversation-cache counters; `/props` = chat template + defaults. Nothing to add for "same sort of metrics".
+- **Routed-expert LoRA (NEW: `--lora --lora-exps`): BUILT, NOT WORKING.** Interface `NativeExpertLora`
+  (include/strata/kernels/iq_kernels.hpp) + `lora_gu_kernel`/`lora_down_kernel` (src/kernels/cuda/iq_kernels.cu),
+  called from `native_expert_grouped` after the GU launch (before SwiGLU) and after the down launch; `Ds4MoeLoraHost`
+  (tools/ds4/ds4_moe.hpp) + device upload in the tier + per-entry expert ids at the `gpu_run` and `gpu_run_chunk`
+  sites; glm_generate flattens the adapter's `ffn_*_exps` into it. Two blockers:
+  1. **NaN.** With `--lora-exps` (pcie 1.0, chat.i32) the run finished rc 0 but dumped **all-NaN logits** -> the
+     per-entry expert id is wrong somewhere. Suspect: in the PCIe launch group `dst[i]` may already be an expert id,
+     not the routing index the decode site assumes (`exp[i] = ids6[dst[i]]`); an out-of-range id reads past the A/B
+     arrays. Check the PCIe `dst` build in gpu_run before anything else.
+  2. **Coverage is partial even when correct.** Only the GPU grouped path is instrumented; the CPU pool
+     (`native_gu_rows`/`native_down_rows`) and the MMQ chunk path are not, and the tier sends a large share of experts
+     there (the A/B showed cpu pool ~390 ms/token). So within one token some experts would be ablated and some not -
+     the all-or-nothing problem. Cheapest fix: when `--lora-exps`, force `pcie_frac = 1.0` AND require the whole routed
+     set in the arena (no file tier), so every expert goes through `native_expert_grouped`; else wire the CPU/MMQ paths.
+  Also the fp32 upload is ~550 MB VRAM (26 layers x 288 experts x 6 arrays) - store fp16 to halve it, and the configs
+  never enable `--lora-exps` (the default path is bit-identical: `lora == nullptr`).

@@ -52,6 +52,7 @@ struct Args {
     uint64_t seed = 1;
     std::vector<int> stop;
     bool serve = false;              // --serve: Strata's engine line protocol on stdin/stdout (serve/server.py)
+    bool lora_exps = false;          // --lora-exps: also apply the adapter's routed-expert (ffn_*_exps) deltas
     bool ppl = false, vram_lru = false, arena_adapt = false, arena_skip = false;
     int prefill_chunk = 0;           // --prefill-chunk N: the prompt in passes of N tokens (0 = the decode loop)
     bool chunk_mmq = false, chunk_prestage = false, allow_long = false;
@@ -99,6 +100,7 @@ bool parse(int argc, char ** argv, Args & a) {
         else if (k == "--vram-lru") a.vram_lru = true;
         else if (k == "--arena-adapt") a.arena_adapt = true;
         else if (k == "--serve") a.serve = true;
+        else if (k == "--lora-exps") a.lora_exps = true;
         else if (k == "--arena-skip-resident") a.arena_skip = true;
         else if (k == "--prefill-chunk") a.prefill_chunk = std::atoi(next().c_str());
         else if (k == "--chunk-mmq") a.chunk_mmq = true;
@@ -173,7 +175,8 @@ int main(int argc, char ** argv) {
                              "       [--route-bias X] [--ctx N] [--temp 0] [--stop id,id] [--ppl] [--dump-logits f] [--dump-routes f]\n"
                              "       [--lora adapter.gguf] [--prefill-chunk N [--chunk-mmq] [--chunk-prestage]] [--allow-long-ctx]\n"
                              "       [--prune f [--prune-penalty X]] [--arena-adapt [--arena-admit HALF_LIFE_TOKENS]]\n"
-                             "       [--skip-miss T] [--skip-file T] [--skip-file-prefill T] [--vram-grow KEEP_GIB]\n");
+                             "       [--skip-miss T] [--skip-file T] [--skip-file-prefill T] [--vram-grow KEEP_GIB]\n"
+                             "       [--lora-exps] (with --lora: also apply the routed-expert ffn_*_exps deltas)\n");
         return 2;
     }
     std::vector<int> prompt = a.ids_csv.empty() ? std::vector<int>() : parse_csv(a.ids_csv);
@@ -218,6 +221,51 @@ int main(int argc, char ** argv) {
                  (long long) std::count(G.is_kda.begin(), G.is_kda.end(), true),
                  (long long) std::count(G.is_kda.begin(), G.is_kda.end(), false), (long long) G.n_expert,
                  (long long) G.n_expert_used, (long long) G.vocab, (now_ms() - t_load0) / 1000.0);
+    // --lora-exps: the adapter's routed-expert (ffn_gate/up/down_exps) deltas, flattened per layer for the tier.
+    // GlmDense applies only the solo targets (attn_output, ffn_down_shexp) via dc.lora; without this the 78
+    // routed-expert pairs - the bulk of the abliteration - are silently dropped.  These arrays live for the whole
+    // run (the tier copies them to the device at init); a layer with no expert deltas stays all-null.
+    std::vector<strata::ds4::Ds4MoeLoraHost> lora_host;
+    std::deque<std::vector<float>> lora_buf;   // deque: emplace_back never moves the earlier arrays
+    if (a.lora_exps) {
+        if (a.lora.empty()) { std::fprintf(stderr, "glm_generate: --lora-exps needs --lora ADAPTER\n"); return 2; }
+        const int64_t NE = G.n_expert;
+        lora_host.assign((size_t) G.n_layer, strata::ds4::Ds4MoeLoraHost());
+        auto flat = [&](int64_t l, strata::glm::LoraAdapter::Mod m, bool is_a) -> const float* {
+            const strata::glm::Lora1* v0 = lora_ad.exps(l, m, 0);
+            if (!v0) return nullptr;
+            const int64_t k = (int64_t) (is_a ? v0->a.size() : v0->b.size());
+            lora_buf.emplace_back((size_t) (NE * k));
+            std::vector<float>& out = lora_buf.back();
+            for (int64_t e = 0; e < NE; ++e) {
+                const strata::glm::Lora1* v = lora_ad.exps(l, m, e);
+                if (!v) return nullptr;
+                const std::vector<float>& src = is_a ? v->a : v->b;
+                if ((int64_t) src.size() != k) return nullptr;
+                std::copy(src.begin(), src.end(), out.begin() + (size_t) (e * k));
+            }
+            return out.data();
+        };
+        int nl = 0;
+        for (int64_t l = 0; l < G.n_layer; ++l) {
+            if (!lora_ad.has(l, strata::glm::LoraAdapter::GATE)) continue;
+            strata::ds4::Ds4MoeLoraHost& h = lora_host[(size_t) l];
+            h.a_g = flat(l, strata::glm::LoraAdapter::GATE, true);
+            h.b_g = flat(l, strata::glm::LoraAdapter::GATE, false);
+            h.a_u = flat(l, strata::glm::LoraAdapter::UP, true);
+            h.b_u = flat(l, strata::glm::LoraAdapter::UP, false);
+            h.a_d = flat(l, strata::glm::LoraAdapter::DOWN, true);
+            h.b_d = flat(l, strata::glm::LoraAdapter::DOWN, false);
+            if (!h.a_g || !h.b_g || !h.a_u || !h.b_u || !h.a_d || !h.b_d) {
+                std::fprintf(stderr, "glm_generate: --lora-exps: layer %lld has an incomplete expert delta\n",
+                             (long long) l);
+                return 2;
+            }
+            h.n_experts = NE;
+            ++nl;
+        }
+        std::fprintf(stderr, "lora: routed-expert deltas for %d layer(s) (n_experts %lld)\n", nl, (long long) NE);
+    }
     double slot_gib_auto = 0, slot_gib_max = 0;
     if (a.slots <= 0 && a.experts != "cpu") {
         size_t fr = 0, tot = 0;
@@ -260,6 +308,7 @@ int main(int argc, char ** argv) {
     mc.arena_admit = a.arena_admit;   // arena_adapt gate: heat half-life in tokens (0 = promote on first read)
     if (a.arena_admit > 0.0f) mc.arena_adapt = true;
     mc.skip_miss = a.skip_miss;   // decode: drop a VRAM-miss expert weighing < skip_miss x the token's weight sum
+    mc.lora = lora_host.empty() ? nullptr : lora_host.data();   // routed-expert deltas (--lora-exps)
     if (mc.saliency && a.prefill_chunk <= 0) { std::fprintf(stderr, "glm_generate: --saliency needs --prefill-chunk\n"); return 2; }
     // --prune FILE: "layer expert" lines; those experts are never routed (selection bias -1e30, REAP-style pruning)
     // and never take arena/VRAM space, so a pruned set that fits RAM+VRAM never touches the file tier.

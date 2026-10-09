@@ -2653,10 +2653,78 @@ bool g_grouped_v1 = env_on("STRATA_GROUPED_V1");
 
 void native_grouped_set_v1(bool v1) { g_grouped_v1 = v1; }
 
+// ---- routed-expert LoRA (NativeExpertLora): two small corrections that ride the grouped path's own buffers.
+// Entry e's expert is ent_exp[e] and its token ent_tok[e]; gate/up are entry-major [e * n_ff + r] and h is their
+// SwiGLU output in the same layout (native_gu_kernel's).  So the gate/up fix runs between the GU launch and SwiGLU
+// (it must precede the nonlinearity), and the down fix after the down kernel wrote out[ent_dst[e] * n_embd + r].
+// One block per entry; a reduction in shared memory gives the two dots.  All pointers are device memory, arrays
+// indexed by expert id.  `lo`/`hi` are the entries this launch computed (the guard against the 256-thread block is
+// why the callers launch exactly hi - lo blocks).
+__global__ void __launch_bounds__(256) lora_gu_kernel(const int32_t* __restrict__ ent_exp,
+                                                      const int32_t* __restrict__ ent_tok,
+                                                      const float* __restrict__ a_g, const float* __restrict__ b_g,
+                                                      const float* __restrict__ a_u, const float* __restrict__ b_u,
+                                                      const float* __restrict__ x, int64_t x_stride, int64_t n_embd,
+                                                      int64_t n_ff, int64_t n_experts, int32_t lo, int32_t hi,
+                                                      float* __restrict__ gate, float* __restrict__ up) {
+    const int e = lo + blockIdx.x;
+    if (e >= hi) return;
+    const int ex = ent_exp[e];
+    if (ex < 0 || ex >= n_experts) return;
+    const int t = threadIdx.x;
+    const float* xt = x + (size_t) ent_tok[e] * (size_t) x_stride;
+    const float* ag = a_g + (size_t) ex * (size_t) n_embd;
+    const float* au = a_u + (size_t) ex * (size_t) n_embd;
+    __shared__ float sh[256], sh2[256];
+    float sg = 0.f, su = 0.f;
+    for (int64_t i = t; i < n_embd; i += blockDim.x) { const float xv = xt[i]; sg += ag[i] * xv; su += au[i] * xv; }
+    sh[t] = sg;
+    sh2[t] = su;
+    __syncthreads();
+    for (int o = blockDim.x >> 1; o > 0; o >>= 1) {
+        if (t < o) { sh[t] += sh[t + o]; sh2[t] += sh2[t + o]; }
+        __syncthreads();
+    }
+    const float SG = sh[0], SU = sh2[0];
+    const float* bg = b_g + (size_t) ex * (size_t) n_ff;
+    const float* bu = b_u + (size_t) ex * (size_t) n_ff;
+    float* g = gate + (size_t) e * (size_t) n_ff;
+    float* u = up + (size_t) e * (size_t) n_ff;
+    for (int64_t r = t; r < n_ff; r += blockDim.x) { g[r] += bg[r] * SG; u[r] += bu[r] * SU; }
+}
+
+__global__ void __launch_bounds__(256) lora_down_kernel(const int32_t* __restrict__ ent_exp,
+                                                        const int32_t* __restrict__ ent_dst,
+                                                        const float* __restrict__ a_d, const float* __restrict__ b_d,
+                                                        const float* __restrict__ h, int64_t n_ff, int64_t n_embd,
+                                                        int64_t n_experts, int32_t lo, int32_t hi,
+                                                        float* __restrict__ out) {
+    const int e = lo + blockIdx.x;
+    if (e >= hi) return;
+    const int ex = ent_exp[e];
+    if (ex < 0 || ex >= n_experts) return;
+    const int t = threadIdx.x;
+    const float* he = h + (size_t) e * (size_t) n_ff;
+    const float* ad = a_d + (size_t) ex * (size_t) n_ff;
+    __shared__ float sh[256];
+    float s = 0.f;
+    for (int64_t i = t; i < n_ff; i += blockDim.x) s += ad[i] * he[i];
+    sh[t] = s;
+    __syncthreads();
+    for (int o = blockDim.x >> 1; o > 0; o >>= 1) {
+        if (t < o) sh[t] += sh[t + o];
+        __syncthreads();
+    }
+    const float S = sh[0];
+    const float* bd = b_d + (size_t) ex * (size_t) n_embd;
+    float* o = out + (size_t) ent_dst[e] * (size_t) n_embd;
+    for (int64_t j = t; j < n_embd; j += blockDim.x) o[j] += bd[j] * S;
+}
+
 void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long* grp_ptr, const int32_t* grp_start,
                            const int32_t* n_groups, const int32_t* ent_dst, const int32_t* ent_tok, int64_t cap_groups,
                            int64_t cap_entries, const void* x_q8_1, void* scratch, float* out, void* stream,
-                           int64_t grid_groups) {
+                           int64_t grid_groups, const NativeExpertLora* lora) {
     if (cap_groups <= 0 || cap_entries <= 0) return;
     if (L.n_ff % 32 != 0) { std::fprintf(stderr, "native_expert_grouped: n_ff %lld\n", (long long) L.n_ff); std::exit(1); }
     cudaStream_t s = (cudaStream_t) stream;
@@ -2737,6 +2805,12 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     }
 #endif
     check("native_expert_grouped/gu");
+    if (lora && lora->a_g && g_exp_phase != 2 && lora->ent_lo < lora->ent_hi) {   // before SwiGLU (its input)
+        lora_gu_kernel<<<(unsigned) (lora->ent_hi - lora->ent_lo), 256, 0, s>>>(
+            lora->ent_exp, ent_tok, lora->a_g, lora->b_g, lora->a_u, lora->b_u, lora->x, lora->x_stride,
+            L.n_embd, L.n_ff, lora->n_experts, (int32_t) lora->ent_lo, (int32_t) lora->ent_hi, gate, up);
+        check("native_expert_grouped/lora gu");
+    }
     const long long nh = (long long) cap_entries * L.n_ff;
 #if defined(STRATA_HIP_GFX906)
     // gfx906: the separate SwiGLU and q8_1 passes stay the default (the A/B baseline); the RDNA one-pass
@@ -2789,6 +2863,12 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
         default: std::fprintf(stderr, "native_expert_grouped: down type %d\n", L.d_type); std::exit(1);
     }
     check("native_expert_grouped/down");
+    if (lora && lora->a_d && lora->ent_lo < lora->ent_hi) {   // after the down kernel wrote `out`
+        lora_down_kernel<<<(unsigned) (lora->ent_hi - lora->ent_lo), 256, 0, s>>>(
+            lora->ent_exp, ent_dst, lora->a_d, lora->b_d, h, L.n_ff, L.n_embd, lora->n_experts,
+            (int32_t) lora->ent_lo, (int32_t) lora->ent_hi, out);
+        check("native_expert_grouped/lora down");
+    }
 }
 
 // out[t][i] = sum_k w[t*K + k] * parts[(t*K + k)][i] - the prompt chunk's top-k mix on the card (MiMo prefill), so

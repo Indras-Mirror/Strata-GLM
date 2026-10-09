@@ -70,16 +70,36 @@ size_t native_expert_scratch_bytes(int64_t cap_entries, int64_t n_ff);
 /// out[t] = sum_k w[t*K + k] * parts[t*K + k] over rows of H floats, t < n (device pointers; the prompt chunk's mix).
 void weighted_rows_sum(const float* parts, const float* w, int K, int64_t H, int64_t n, float* out, void* stream);
 
+/// Routed-expert rank-1 LoRA (the GLM abliteration adapter): per-layer deltas the grouped path adds to the experts'
+/// gate/up pre-activations and to their down outputs, WITHOUT touching the quantized blobs.  For expert e, entry
+/// token x: s_g = <a_g[e], x>, gate_r += b_g[e][r] * s_g (and the same for up); then s_d = <a_d[e], h>, and the
+/// down output += b_d[e] * s_d (h = the SwiGLU output already in scratch).  Every pointer is DEVICE memory; all
+/// null (the default) = off, bit-identical to the unmodified path.  The arrays are indexed by expert id.
+struct NativeExpertLora {
+    const float* a_g = nullptr;      ///< [n_experts][n_embd]
+    const float* b_g = nullptr;      ///< [n_experts][n_ff]
+    const float* a_u = nullptr;
+    const float* b_u = nullptr;
+    const float* a_d = nullptr;      ///< [n_experts][n_ff]
+    const float* b_d = nullptr;      ///< [n_experts][n_embd]
+    const int32_t* ent_exp = nullptr;   ///< [cap_entries] expert id of each entry (device, as ent_tok/ent_dst)
+    const float* x = nullptr;        ///< fp32 activations, `x_stride` floats per token (indexed by ent_tok[e])
+    int64_t x_stride = 0;
+    int64_t n_experts = 0;
+    int64_t ent_lo = 0, ent_hi = 0;  ///< correct entries [lo, hi) (the launch's active entry range); lo == hi = none
+};
+
 /// Grouped experts in the native format: group g's blob at device address grp_ptr[g]; its entries
 /// [grp_start[g], grp_start[g+1]) read token ent_tok[e]'s q8_1 activation (n_embd/32 blocks per token in x_q8_1)
 /// and write row ent_dst[e] of `out` (n_embd floats).  Counts are read on the device.
 /// `grid_groups` (1 .. cap_groups; 0 = cap_groups) groups run side by side, a block row each striding over the rest:
 /// a call that usually has few groups or none (the verify window's PCIe share) launches less for the ones it does
 /// not have.  The results do not depend on it.
+/// `lora` (optional): the routed-expert rank-1 deltas above; null = the unmodified path.
 void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long* grp_ptr, const int32_t* grp_start,
                            const int32_t* n_groups, const int32_t* ent_dst, const int32_t* ent_tok, int64_t cap_groups,
                            int64_t cap_entries, const void* x_q8_1, void* scratch, float* out, void* stream,
-                           int64_t grid_groups = 0);
+                           int64_t grid_groups = 0, const NativeExpertLora* lora = nullptr);
 /// true: `native_expert_grouped`'s launches before the group stride (STRATA_GROUPED_V1=1 at startup) - a block row
 /// per possible group, SwiGLU and the q8_1 quantization as two kernels over all cap_entries.  Bitwise the same results
 /// (native_grouped_parity checks it); kept for A/B timing.  Set before graph capture; captured graphs keep theirs.

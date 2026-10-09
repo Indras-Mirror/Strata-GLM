@@ -187,6 +187,20 @@ private:
 /// pcie 0.25 dithered, pf-b 1.43 experts/layer, and a host arena budgeted for every expert of the real model
 /// (72.6 GiB).  `arena_gib` is a budget, not a promise: the arena fills in profile order up to it and everything
 /// past it is read from the blob source on demand (the file tier).
+/// Per-layer routed-expert rank-1 deltas (the GLM abliteration adapter): each host array is [n_experts][k] float,
+/// k = n_embd for a_g / a_u / b_d and n_ff for b_g / b_u / a_d.  All null = the layer carries no expert deltas.
+/// The tier uploads them once and the grouped CUDA path applies them (strata::kernels::NativeExpertLora); nothing is
+/// merged into the quantized blobs.  DS4 and MiMo pass nothing.
+struct Ds4MoeLoraHost {
+    const float* a_g = nullptr;   ///< [n_experts][n_embd]
+    const float* b_g = nullptr;   ///< [n_experts][n_ff]
+    const float* a_u = nullptr;
+    const float* b_u = nullptr;
+    const float* a_d = nullptr;   ///< [n_experts][n_ff]
+    const float* b_d = nullptr;   ///< [n_experts][n_embd]
+    int64_t n_experts = 0;
+};
+
 struct Ds4MoeConfig {
     int64_t slots = 2150;         ///< VRAM expert slots (6.75 MiB each); 0 or `no_cache` = none
     double pcie_frac = 0.25;      ///< share of the (non-prefetched) misses computed on the GPU
@@ -247,6 +261,9 @@ struct Ds4MoeConfig {
     /// conversation (route_probe sim, 1800 slots: static 40.5% held-out hit, LRU 61.6%; FINDINGS s16).  Same math per
     /// expert; only where the blob sits changes.  Off = the static seed, as before.
     bool vram_lru = false;
+    /// GLM abliteration LoRA (routed experts): per-layer rank-1 deltas, an array of `n_layers` entries or null (the
+    /// default: off).  The grouped CUDA path applies them; the CPU pool and the MMQ chunk path do not (yet).
+    const Ds4MoeLoraHost* lora = nullptr;
     uint64_t seed = 20261005;     ///< the synthetic arm's generator (unused by the tier itself)
 
     static constexpr int kPredW = 16;   ///< ranked predictions the caller passes to `prefetch`
