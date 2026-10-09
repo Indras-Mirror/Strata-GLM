@@ -554,6 +554,11 @@ int main(int argc, char ** argv) {
                 hist.clear();
                 snap_len = -1;
             }
+            // why a follow-up did or did not reuse: lcp = the shared prefix, hist = what the state has seen, snap =
+            // where the snapshot sits (the end of the last prompt; -1 = no snapshot).  0 reused on a follow-up whose
+            // prefix matches means the snapshot was unavailable (e.g. the device copy failed under VRAM pressure).
+            std::fprintf(stderr, "serve: reuse lcp=%zu hist=%zu snap=%d prompt=%zu -> reused=%d\n",
+                         lcp, hist.size(), snap_len, ids.size(), reused);
             if (reused > 0) { std::printf("RESUME %d\n", reused); std::fflush(stdout); }
             tier.reset_stats();
             const double tp0 = now_ms();
@@ -573,6 +578,7 @@ int main(int argc, char ** argv) {
             }
             hist = ids;
             if (dense.snapshot()) snap_len = (int) hist.size();
+            else std::fprintf(stderr, "serve: snapshot failed: %s\n", dense.last_error().c_str());
             const double prompt_ms = now_ms() - tp0;
             std::fprintf(stderr, "serve: prompt %d tokens (%d reused) in %.2f s = %.1f tok/s\n", total, reused,
                          prompt_ms / 1000.0, 1000.0 * (total - reused) / std::max(prompt_ms, 1e-9));
