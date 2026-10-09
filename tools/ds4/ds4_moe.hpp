@@ -206,6 +206,10 @@ struct Ds4MoeConfig {
     /// takes the ranked profile's head until `slots` experts OR this many bytes, sizing each slot to its expert.
     /// 0 = `slots` x the largest blob.  Ignored for uniform geometries (DS4: `slots` alone, as before).
     double slot_gib = 0.0;
+    /// Elastic VRAM cache (per-layer-sized geometries): when > slot_gib, the cache is OPENED this big (CUDA VMM
+    /// segments) in the ranked order, seeded and kept mapped only up to `slot_gib` (the prompt chunks' VRAM stays
+    /// free), and `grow_cache` maps + fills the rest after the prompt.  0 = off.
+    double slot_gib_max = 0.0;
     /// Leave the experts the VRAM seed takes OUT of the host arena: a cache that never evicts never reads their arena
     /// copies again, so the bytes go to the next-ranked experts (fewer file-tier reads); with `vram_lru` an evicted
     /// expert is demoted into the arena slot its replacement vacates.  Off = the arena holds the ranking's head.
@@ -358,6 +362,10 @@ public:
     bool build_arena_from_routes(const std::string& routes_bin, int batch_tokens, std::string& err);
     /// Frees run_chunk's device and pinned buffers (the next run_chunk allocates them again).
     void release_chunk();
+    /// Elastic cache (cfg.slot_gib_max): after the prompt (release_chunk), map more of the cache - up to its full
+    /// size, leaving `keep_free_gib` of VRAM free - and fill the new slots with the next experts of the seed's
+    /// ranking (arena copies, else file reads).  Returns the slots added (0 when not elastic), -1 on error (`err`).
+    int64_t grow_cache(double keep_free_gib, std::string& err);
     /// REAP accumulators (Ds4MoeConfig::saliency), [layer * n_experts + expert]; empty when off.
     const std::vector<double>& saliency_sum() const;
     const std::vector<int64_t>& saliency_count() const;

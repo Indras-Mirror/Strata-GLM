@@ -1,0 +1,84 @@
+memguard: scope ds4-guard-638416 MemoryMax=84G swap=0 floor=4 GiB (avail 83 GiB)
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24080 MiB):
+  Device 0: NVIDIA GeForce RTX 4090, compute capability 8.9, VMM: yes, VRAM: 24080 MiB
+dense backend: CUDA0
+glm5-next: 45 layers (34 KDA, 11 MLA), 288 experts top-8, vocab 154880; dense half loaded in 4.2 s
+slots auto: 16.78 GiB free after the dense half -> 8.78 GiB of expert slots (margin 8.00 GiB)
+prune: 3024 (layer, expert) pairs masked out of routing (bench/glm-2026-10-09/prune-ezct-0.25.txt)
+tier: gpu, 1145 resident slots, arena 66.1 GiB (7930 experts), file tier 0; load 55.9 s
+prefill 2000/2000 tokens | 237.1 tok/s | 8 s elapsed, ETA 0 s   
+grow_cache: 1145 -> 1909 slots (+764, 0 from the file tier) in 241 ms
+prefill file-tier entries skipped: 40919
+7077
+12
+16
+12949
+10875
+320
+41979
+20
+22247
+decode 8/64 tokens | 8.51 tok/s   7208
+1936
+58303
+77
+340
+262
+51693
+1014
+decode 16/64 tokens | 8.90 tok/s   23125
+353
+282
+8821
+3268
+70
+1014
+23125
+decode 24/64 tokens | 9.30 tok/s   353
+856
+11
+51693
+1014
+23125
+353
+289
+decode 32/64 tokens | 9.66 tok/s   16
+11
+51693
+1014
+23125
+353
+289
+18
+decode 40/64 tokens | 9.59 tok/s   11
+51693
+1014
+23125
+353
+289
+17
+345
+decode 48/64 tokens | 9.75 tok/s   2549
+51693
+1014
+23125
+353
+264
+16
+11
+decode 56/64 tokens | 9.77 tok/s   51693
+1014
+23125
+353
+264
+18
+11
+
+prefill: 2000 tokens in 9.18 s = 217.85 tok/s (chunked)
+prefill chunks of 2048: attention+router 1037 ms, experts 7113 ms, finish 193 ms, head/ppl 17 ms
+decode : 64 tokens, 63 forward passes in 6.42 s = 9.82 tok/s
+experts/token: hit 31.8% (prefetched-useful 38.8/token of 59.9 issued), cpu 35.4%, pcie 18.9%, file tier 57, skipped 46.9/token
+tier moves: vram_lru swaps 0.00/pass (demoted 0), arena swaps 49 (admit rejects 0), file reads 7.11 ms/pass, file-tier skipped 1176
+decode ms/token: predict+prefetch 2.43, attention+router 17.80, experts 78.56, finish 1.99, head 0.49
+tier ms/token: wall 78.54 (gpu hits 10.26, pcie 36.94, cpu pool 67.71)
+VRAM free at the end: 0.64 GiB

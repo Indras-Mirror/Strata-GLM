@@ -1,0 +1,83 @@
+memguard: scope ds4-guard-625593 MemoryMax=84G swap=0 floor=4 GiB (avail 83 GiB)
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24080 MiB):
+  Device 0: NVIDIA GeForce RTX 4090, compute capability 8.9, VMM: yes, VRAM: 24080 MiB
+dense backend: CUDA0
+glm5-next: 45 layers (34 KDA, 11 MLA), 288 experts top-8, vocab 154880; dense half loaded in 3.5 s
+slots auto: 16.80 GiB free after the dense half -> 8.80 GiB of expert slots (margin 8.00 GiB)
+prune: 3024 (layer, expert) pairs masked out of routing (bench/glm-2026-10-09/prune-ezct-0.25.txt)
+tier: gpu, 1143 resident slots, arena 66.1 GiB (7929 experts), file tier 0; load 49.2 s
+prefill 2000/2000 tokens | 242.5 tok/s | 8 s elapsed, ETA 0 s   
+prefill file-tier entries skipped: 40822
+7077
+12
+16
+12949
+10875
+320
+41979
+20
+22247
+decode 8/64 tokens | 6.64 tok/s   7208
+1936
+58303
+77
+340
+262
+51693
+1014
+decode 16/64 tokens | 7.13 tok/s   23125
+353
+282
+8821
+3268
+70
+1014
+23125
+decode 24/64 tokens | 7.77 tok/s   353
+856
+11
+51693
+1014
+23125
+353
+289
+decode 32/64 tokens | 8.15 tok/s   16
+11
+51693
+1014
+23125
+353
+289
+17
+decode 40/64 tokens | 8.36 tok/s   11
+51693
+1014
+23125
+353
+289
+18
+345
+decode 48/64 tokens | 8.50 tok/s   2549
+51693
+1014
+23125
+353
+264
+16
+11
+decode 56/64 tokens | 8.62 tok/s   51693
+1014
+23125
+353
+264
+17
+11
+
+prefill: 2000 tokens in 8.70 s = 229.83 tok/s (chunked)
+prefill chunks of 2048: attention+router 1089 ms, experts 6883 ms, finish 194 ms, head/ppl 22 ms
+decode : 64 tokens, 63 forward passes in 7.21 s = 8.74 tok/s
+experts/token: hit 24.7% (prefetched-useful 43.0/token of 60.0 issued), cpu 39.5%, pcie 21.1%, file tier 64, skipped 49.3/token
+tier moves: vram_lru swaps 0.00/pass (demoted 0), arena swaps 57 (admit rejects 0), file reads 9.04 ms/pass, file-tier skipped 1233
+decode ms/token: predict+prefetch 2.62, attention+router 18.87, experts 88.36, finish 3.65, head 0.52
+tier ms/token: wall 88.34 (gpu hits 10.66, pcie 41.09, cpu pool 76.80)
+VRAM free at the end: 6.56 GiB

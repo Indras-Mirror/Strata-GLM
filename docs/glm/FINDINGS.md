@@ -340,3 +340,30 @@ NOT measured yet: anything on the real model.
   numerically by ~1-2% ppl**. Same family as the open chunk-vs-loop gap (s8). Consequences: (1) compare chunked
   ppls only at the same margin; (2) "soft prune +2% vs base" (s12) is within this path spread; the robust result
   is soft ~= base and hard = +61% on German; (3) the fork oracle (RESUME next step) should say which path is right.
+
+## s15 (2026-10-09 18:13-18:24): real-use numbers + elastic VRAM cache (chains 13-14)
+- **Real use = chunked prefill then decode in ONE process, no --ppl** (the --ppl head over every position was
+  costing prefill a lot): soft best config, eval_code 2000-token prompt, 64 decoded tokens:
+
+  | margin / chunk | --vram-grow | slots prefill -> decode | prefill tok/s | decode tok/s |
+  |---|---|---|---|---|
+  | 5.5 / 1024 | - | 1493 | 177.9 | 8.83 |
+  | 8 / 2048 | - | 1143 | 229.8 | 8.74 |
+  | 5.5 / 1024 | 1 | 1495 -> 1974 (+479 in 151 ms) | 177.7 | **9.80** |
+  | **8 / 2048** | **1** | 1145 -> 1909 (+764 in 241 ms) | **217.9** | **9.82** |
+
+  The decode numbers of s11-s13 (10.82) were at margin 1 after a 300-token decode-loop prompt (which also warms
+  arena_adapt); in real use the prompt's margin shrank the VRAM cache and cost ~2 tok/s.
+- **Elastic cache** (`--vram-grow KEEP_GIB`; Ds4MoeConfig::slot_gib_max + Ds4MoeTier::grow_cache): the cache is
+  opened at the decode size (free - KEEP) as CUDA VMM segments (64 MiB) in the ranked order, mapped/seeded only up
+  to the prompt's budget (free - margin), and after the prompt (release_chunk) the rest is mapped and filled with
+  the next ranked experts from their arena copies (the arena still holds them: arena_skip_resident skips only the
+  seeded part). Chunk 2048 now costs decode nothing.
+- Left on the table: GlmDense keeps the chunk allocator's compute buffer (allo_big) and NT-sized hand-off state
+  after the prompt (1909 slots vs 2091 at margin 1). Freeing/re-creating allo_big needs care: chunk Vars cache
+  the allocator pointer.
+- **Best real-use config now:** `--prune bench/glm-2026-10-09/prune-ezct-0.25.txt --prune-penalty 0.05 --arena-adapt
+  --skip-file 0.15 --skip-file-prefill 0.15 --skip-miss 0.05 --pcie 0.35 --prefill-chunk 2048 --chunk-mmq
+  --vram-margin 8 --vram-grow 1 --arena-skip-resident --arena-gib 72 --slots auto` -> prefill ~220-230 tok/s,
+  decode ~9.8 tok/s (session start: 2.1 tok/s prefill-loop / 3.7 decode unpruned; this morning hard prune 175 / 9.3
+  with German +61%).

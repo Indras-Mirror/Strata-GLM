@@ -29,6 +29,10 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
   --skip-miss 0.10, +4% ppl). Hard prune hurts uncalibrated languages (German -18..-29%).
 - **Long context WORKS (FINDINGS s9):** `--ctx 524288` allocates (~6 GB latent cache, 734 VRAM slots left at margin
   5.5); 50K-token prefill **229.6 tok/s**; decode at 50K depth **8.23 tok/s** (vs ~8.5 at 2K).
+- **Best real-use config (FINDINGS s15):** `--prune bench/glm-2026-10-09/prune-ezct-0.25.txt --prune-penalty 0.05
+  --arena-adapt --skip-file 0.15 --skip-file-prefill 0.15 --skip-miss 0.05 --pcie 0.35 --prefill-chunk 2048
+  --chunk-mmq --vram-margin 8 --vram-grow 1 --arena-skip-resident --arena-gib 72 --slots auto` -> prefill ~220-230,
+  decode ~9.8 tok/s in one process; German ~= unpruned. Measure real use WITHOUT --ppl (it slows prefill).
 - **Soft prune DONE (FINDINGS s10-s12):** GLM's sigmoid router needs penalty ~0.05 (not DS4's 0.5). Recommended:
   `--prune bench/glm-2026-10-09/prune-ezct-0.25.txt --prune-penalty 0.05 --arena-adapt --skip-file 0.15
   --skip-file-prefill 0.15 --skip-miss 0.05 --pcie 0.35` -> decode ~10.8 tok/s (hard prune 9.5), prefill 130-140, German +2% vs unpruned (hard +61%),

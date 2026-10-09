@@ -1,0 +1,21 @@
+### c13-m55c1024 18:17:20
+exit 0 18:18:28
+tier: gpu, 1493 resident slots, arena 63.4 GiB (7579 experts), file tier 0; load 46.4 s
+prefill file-tier entries skipped: 41368
+prefill: 2000 tokens in 11.24 s = 177.93 tok/s (chunked)
+prefill chunks of 1024: attention+router 1002 ms, experts 9533 ms, finish 179 ms, head/ppl 20 ms
+decode : 64 tokens, 63 forward passes in 7.13 s = 8.83 tok/s
+experts/token: hit 27.9% (prefetched-useful 41.0/token of 59.9 issued), cpu 38.0%, pcie 20.2%, file tier 83, skipped 46.7/token
+tier moves: vram_lru swaps 0.00/pass (demoted 0), arena swaps 70 (admit rejects 0), file reads 9.88 ms/pass, file-tier skipped 1128
+decode ms/token: predict+prefetch 2.73, attention+router 18.03, experts 87.61, finish 4.12, head 0.51
+### c13-m8c2048 18:18:28
+exit 0 18:19:36
+tier: gpu, 1143 resident slots, arena 66.1 GiB (7929 experts), file tier 0; load 49.2 s
+prefill file-tier entries skipped: 40822
+prefill: 2000 tokens in 8.70 s = 229.83 tok/s (chunked)
+prefill chunks of 2048: attention+router 1089 ms, experts 6883 ms, finish 194 ms, head/ppl 22 ms
+decode : 64 tokens, 63 forward passes in 7.21 s = 8.74 tok/s
+experts/token: hit 24.7% (prefetched-useful 43.0/token of 60.0 issued), cpu 39.5%, pcie 21.1%, file tier 64, skipped 49.3/token
+tier moves: vram_lru swaps 0.00/pass (demoted 0), arena swaps 57 (admit rejects 0), file reads 9.04 ms/pass, file-tier skipped 1233
+decode ms/token: predict+prefetch 2.62, attention+router 18.87, experts 88.36, finish 3.65, head 0.52
+=== chain13 done 18:19:36

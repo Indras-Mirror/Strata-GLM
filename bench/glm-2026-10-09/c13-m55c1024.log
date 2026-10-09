@@ -1,0 +1,83 @@
+memguard: scope ds4-guard-620156 MemoryMax=84G swap=0 floor=4 GiB (avail 83 GiB)
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24080 MiB):
+  Device 0: NVIDIA GeForce RTX 4090, compute capability 8.9, VMM: yes, VRAM: 24080 MiB
+dense backend: CUDA0
+glm5-next: 45 layers (34 KDA, 11 MLA), 288 experts top-8, vocab 154880; dense half loaded in 2.4 s
+slots auto: 16.99 GiB free after the dense half -> 11.49 GiB of expert slots (margin 5.50 GiB)
+prune: 3024 (layer, expert) pairs masked out of routing (bench/glm-2026-10-09/prune-ezct-0.25.txt)
+tier: gpu, 1493 resident slots, arena 63.4 GiB (7579 experts), file tier 0; load 46.4 s
+prefill 1024/2000 tokens | 165.0 tok/s | 6 s elapsed, ETA 6 s   prefill 2000/2000 tokens | 185.7 tok/s | 11 s elapsed, ETA 0 s   
+prefill file-tier entries skipped: 41368
+7077
+12
+16
+12949
+10875
+320
+41979
+20
+22247
+decode 8/64 tokens | 7.35 tok/s   7208
+1936
+58303
+77
+340
+262
+51693
+1014
+decode 16/64 tokens | 7.86 tok/s   23125
+353
+282
+8821
+3268
+70
+1014
+23125
+decode 24/64 tokens | 8.15 tok/s   353
+856
+11
+51693
+1014
+23125
+353
+289
+decode 32/64 tokens | 8.49 tok/s   99366
+11
+51693
+1014
+23125
+353
+289
+99366
+decode 40/64 tokens | 8.64 tok/s   3712
+4306
+11
+51693
+1014
+23125
+353
+289
+decode 48/64 tokens | 8.65 tok/s   99366
+3712
+880
+345
+2549
+51693
+1014
+23125
+decode 56/64 tokens | 8.71 tok/s   353
+289
+99366
+3712
+11
+51693
+1014
+
+prefill: 2000 tokens in 11.24 s = 177.93 tok/s (chunked)
+prefill chunks of 1024: attention+router 1002 ms, experts 9533 ms, finish 179 ms, head/ppl 20 ms
+decode : 64 tokens, 63 forward passes in 7.13 s = 8.83 tok/s
+experts/token: hit 27.9% (prefetched-useful 41.0/token of 59.9 issued), cpu 38.0%, pcie 20.2%, file tier 83, skipped 46.7/token
+tier moves: vram_lru swaps 0.00/pass (demoted 0), arena swaps 70 (admit rejects 0), file reads 9.88 ms/pass, file-tier skipped 1128
+decode ms/token: predict+prefetch 2.73, attention+router 18.03, experts 87.61, finish 4.12, head 0.51
+tier ms/token: wall 87.59 (gpu hits 10.29, pcie 39.06, cpu pool 76.16)
+VRAM free at the end: 4.43 GiB

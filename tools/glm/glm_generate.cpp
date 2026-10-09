@@ -38,7 +38,7 @@ struct Args {
     int n_predict = 64;
     std::string backend = "cuda", experts = "gpu";
     int64_t slots = 0;   // 0 = auto
-    double vram_margin_gib = 1.0, pcie = 0.25, pf_b = 1.43, arena_gib = 60.0;
+    double vram_grow_keep = 0.0, vram_margin_gib = 1.0, pcie = 0.25, pf_b = 1.43, arena_gib = 60.0;
     int threads = 0;
     int64_t ctx = 0;
     float temp = 0.0f, route_bias = 0.0f, prune_penalty = 0.0f, skip_miss = 0.0f, skip_file = 0.0f, skip_file_chunk = 0.0f, arena_admit = 0.0f;
@@ -73,6 +73,7 @@ bool parse(int argc, char ** argv, Args & a) {
         else if (k == "--experts") a.experts = next();
         else if (k == "--slots") { const std::string v = next(); a.slots = v == "auto" ? 0 : std::atoll(v.c_str()); }
         else if (k == "--vram-margin") a.vram_margin_gib = std::atof(next().c_str());
+        else if (k == "--vram-grow") a.vram_grow_keep = std::atof(next().c_str());
         else if (k == "--pcie") a.pcie = std::atof(next().c_str());
         else if (k == "--pf-b") a.pf_b = std::atof(next().c_str());
         else if (k == "--profile") a.profile = next();
@@ -134,7 +135,7 @@ int main(int argc, char ** argv) {
                              "       [--route-bias X] [--ctx N] [--temp 0] [--stop id,id] [--ppl] [--dump-logits f] [--dump-routes f]\n"
                              "       [--lora adapter.gguf] [--prefill-chunk N [--chunk-mmq] [--chunk-prestage]] [--allow-long-ctx]\n"
                              "       [--prune f [--prune-penalty X]] [--arena-adapt [--arena-admit HALF_LIFE_TOKENS]]\n"
-                             "       [--skip-miss T] [--skip-file T] [--skip-file-prefill T]\n");
+                             "       [--skip-miss T] [--skip-file T] [--skip-file-prefill T] [--vram-grow KEEP_GIB]\n");
         return 2;
     }
     std::vector<int> prompt = a.ids_csv.empty() ? std::vector<int>() : parse_csv(a.ids_csv);
@@ -179,7 +180,7 @@ int main(int argc, char ** argv) {
                  (long long) std::count(G.is_kda.begin(), G.is_kda.end(), true),
                  (long long) std::count(G.is_kda.begin(), G.is_kda.end(), false), (long long) G.n_expert,
                  (long long) G.n_expert_used, (long long) G.vocab, (now_ms() - t_load0) / 1000.0);
-    double slot_gib_auto = 0;
+    double slot_gib_auto = 0, slot_gib_max = 0;
     if (a.slots <= 0 && a.experts != "cpu") {
         size_t fr = 0, tot = 0;
         ggml_backend_dev_memory(ggml_backend_get_device(be), &fr, &tot);
@@ -192,6 +193,10 @@ int main(int argc, char ** argv) {
         slot_gib_auto = std::max(0.0, ((double) fr - a.vram_margin_gib * 1073741824.0) / 1073741824.0);
         std::fprintf(stderr, "slots auto: %.2f GiB free after the dense half -> %.2f GiB of expert slots (margin %.2f GiB)\n",
                      fr / 1073741824.0, slot_gib_auto, a.vram_margin_gib);
+        // --vram-grow KEEP: open the cache as if the margin were KEEP (elastic: mapped up to slot_gib for the
+        // prompt, grown after it - see Ds4MoeConfig::slot_gib_max)
+        if (a.vram_grow_keep > 0 && a.vram_grow_keep < a.vram_margin_gib)
+            slot_gib_max = std::max(0.0, ((double) fr - a.vram_grow_keep * 1073741824.0) / 1073741824.0);
     }
 
     namespace ds4 = strata::ds4;
@@ -199,6 +204,7 @@ int main(int argc, char ** argv) {
     ds4::Ds4MoeConfig mc;
     mc.slots = slot_gib_auto > 0 ? G.n_layer * G.n_expert : a.slots;
     mc.slot_gib = slot_gib_auto;
+    mc.slot_gib_max = slot_gib_max;
     mc.pcie_frac = a.pcie;
     mc.pf_b = a.pf_b;
     mc.threads = a.threads;
@@ -425,6 +431,10 @@ int main(int argc, char ** argv) {
             std::fprintf(stderr, "saliency: %s (%zu entries)\n", a.saliency.c_str(), ss.size());
         }
         tier.release_chunk();
+    }
+    if (slot_gib_max > 0) {   // elastic cache: the prompt's VRAM is back - give it to the expert cache for decode
+        std::string gerr;
+        if (tier.grow_cache(a.vram_grow_keep, gerr) < 0) { std::fprintf(stderr, "glm_generate: %s\n", gerr.c_str()); return 1; }
     }
     for (size_t i = 0; a.prefill_chunk <= 0 && i < prompt.size(); ++i) {
         if (!step(prompt[i], (int) i)) {

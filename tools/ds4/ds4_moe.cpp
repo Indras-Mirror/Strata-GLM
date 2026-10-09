@@ -305,6 +305,7 @@ struct Ds4MoeImpl {
     int64_t tick = 0;
     std::vector<int64_t> vlast;       ///< vram_lru: (layer, expert) -> the run() call that last used its VRAM copy
     std::vector<int64_t> vmiss;       ///< vram_lru: (layer, expert) -> the layer's call count at its last miss
+    std::vector<std::pair<int32_t, int32_t>> seed_ranked;   ///< elastic cache: the seed's ranking, for grow_cache
     std::vector<int64_t> lcalls;      ///< vram_lru: run() calls per layer (= decode tokens)
 };
 
@@ -936,9 +937,11 @@ bool Ds4MoeTier::seed_from_ranked(const std::vector<std::pair<int32_t, int32_t>>
     // A per-layer-sized geometry (MiMo) opens its cache now: one slot per ranked expert, each the size of ITS
     // layer's blob, until `slots` experts or `slot_gib` bytes.  The seed below admits in the same order, so slot i
     // is ranked[i]'s and fits it exactly; the cache never evicts, so a slot never meets another layer's blob.
+    const bool elastic = im_->mixed_sizes && im_->cfg.slot_gib > 0 && im_->cfg.slot_gib_max > im_->cfg.slot_gib;
     if (im_->mixed_sizes && im_->gpu && !im_->gpu->cache && !im_->cfg.no_cache && im_->cfg.slots > 0) {
-        const double budget = im_->cfg.slot_gib > 0 ? im_->cfg.slot_gib * 1073741824.0
-                                                     : (double) im_->cfg.slots * (double) im_->blob;
+        const double budget = elastic ? im_->cfg.slot_gib_max * 1073741824.0
+                            : im_->cfg.slot_gib > 0 ? im_->cfg.slot_gib * 1073741824.0
+                                                    : (double) im_->cfg.slots * (double) im_->blob;
         std::vector<int64_t> sizes;
         std::vector<char> seen((size_t) (im_->g.n_layers * im_->g.n_experts), 0);
         double used = 0;
@@ -955,7 +958,14 @@ bool Ds4MoeTier::seed_from_ranked(const std::vector<std::pair<int32_t, int32_t>>
         }
         if (!sizes.empty()) {
             im_->gpu->cache.reset(new strata::core::ExpertCache());
+            if (elastic) im_->gpu->cache->set_segment_bytes((int64_t) 64 << 20);
             if (!im_->gpu->cache->open_sized(sizes, im_->g.n_layers, im_->g.n_experts, err)) return false;
+            if (elastic) {   // keep only the first slot_gib mapped: the rest is the prompt chunks' until grow_cache
+                strata::core::ExpertCache& c = *im_->gpu->cache;
+                const int64_t live = c.slots_within((int64_t) (im_->cfg.slot_gib * 1073741824.0));
+                if (!c.shrink(c.bytes_of(live), err)) return false;
+                im_->seed_ranked = ranked;
+            }
         }
     }
     // uniform blobs with defer_cache: the cache opens now (after the prompt chunks gave their VRAM back)
@@ -966,7 +976,7 @@ bool Ds4MoeTier::seed_from_ranked(const std::vector<std::pair<int32_t, int32_t>>
         if (!im_->gpu->cache->open_sized(sizes, im_->g.n_layers, im_->g.n_experts, err)) return false;
     }
     if (!im_->gpu || !im_->gpu->cache) return true;   // no cache: nothing to seed
-    const int64_t want = std::min<int64_t>(im_->cfg.slots, im_->gpu->cache->full_slots());
+    const int64_t want = std::min<int64_t>(im_->cfg.slots, im_->gpu->cache->slots());   // (elastic: the mapped ones)
     int64_t filled = 0;
     // vram_lru: the LRU's starting order = the profile's rank: the coldest seeded expert goes first
     auto lru_seed_order = [&](int64_t n_seeded) {
@@ -2471,6 +2481,49 @@ void Ds4MoeTier::release_chunk() {
     gp.c_pre_layer = gp.c_pre_half = -1;
     gp.c_pre_e.clear();
     gp.free_mmq();
+#endif
+}
+
+int64_t Ds4MoeTier::grow_cache(double keep_free_gib, std::string& err) {
+#if defined(DS4_MOE_CUDA)
+    if (!im_->gpu || !im_->gpu->cache || !im_->gpu->cache->segmented() || im_->seed_ranked.empty()) return 0;
+    strata::core::ExpertCache& c = *im_->gpu->cache;
+    size_t fr = 0, tot = 0;
+    if (cudaMemGetInfo(&fr, &tot) != cudaSuccess) { err = "grow_cache: cudaMemGetInfo failed"; return -1; }
+    const int64_t room = (int64_t) fr - (int64_t) (keep_free_gib * 1073741824.0);
+    if (room <= 0) return 0;
+    const int64_t before = c.slots();
+    std::string e;
+    c.grow(std::min<int64_t>(c.full_bytes(), c.bytes() + room), e);   // a short grow keeps what it mapped
+    const double t0 = now_ms();
+    int64_t added = 0, nfile = 0;
+    for (const auto& le : im_->seed_ranked) {   // the seed's order: slot i is ranked[i]'s size
+        if (c.resident() >= c.slots()) break;
+        if (!im_->g.routed(le.first) || le.second < 0 || le.second >= im_->g.n_experts) continue;
+        if (c.slot_of(le.first, le.second) >= 0) continue;
+        const int32_t s = c.admit(le.first, le.second);
+        if (s < 0) break;
+        const int64_t BL = im_->bl[(size_t) le.first];
+        if (const uint8_t* p = im_->gpu->arena.ptr(le.first, le.second)) {
+            if (!c.fill_slot_queued(s, p, err, BL)) return -1;
+        } else {
+            bool from_file = false;
+            const uint8_t* q = acquire(*im_, le.first, le.second, 0, &from_file);
+            if (!c.fill_slot_blocking(s, q, err, BL)) return -1;
+            ++nfile;
+        }
+        ++added;
+    }
+    if (cudaStreamSynchronize((cudaStream_t) 0) != cudaSuccess) { err = "grow_cache: queued fills failed"; return -1; }
+    im_->admitted += added;
+    std::fprintf(stderr, "grow_cache: %lld -> %lld slots (+%lld, %lld from the file tier) in %.0f ms%s%s\n",
+                 (long long) before, (long long) c.slots(), (long long) added, (long long) nfile, now_ms() - t0,
+                 e.empty() ? "" : "; grow stopped: ", e.c_str());
+    return added;
+#else
+    (void) keep_free_gib;
+    (void) err;
+    return 0;
 #endif
 }
 
