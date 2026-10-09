@@ -204,3 +204,34 @@ NOT measured yet: anything on the real model.
 - REAP 25% prune, chunk 1024, margin 5.5 (734 VRAM slots): **prefill 50000 tokens in 217.8 s = 229.6 tok/s**
   (attention+router 43 s, experts 169 s); **decode at 50K depth 8.23 tok/s** (attention+router 20.6 ms/token vs
   ~22 at 2K) - long context costs almost nothing in decode. Log: bench/glm-2026-10-09/long50k.log.
+
+## s10 (2026-10-09 16:54-17:03): soft prune on GLM - penalty must be scaled to the router (bench/glm-2026-10-09/chain5.sh)
+- **Penalties don't transfer from DS4.** GLM selects on sigmoid(logit) + exp_probs_b: scores in [0,1], and the bias
+  spread across experts is only p10-p90 0.03-0.13 (blk.3 0.035 ... blk.44 0.131). DS4's 0.5 would be ~a hard prune
+  here, so the sweep is 0.02 / 0.05 / 0.10.
+- List: REAP 25% (72/layer) from en+zh+code+tools calibration (`sal-cal_{code,prose,multi,chat,python,json}`,
+  12000 tokens; romance + German held out) -> `prune-ezct-0.25.txt`; control `prune-rand-0.25.txt` (72/layer, seed 41).
+  Soft runs add `--arena-adapt`. Held-out 2000-token evals, chunk 1024, margin 5.5:
+
+  | config | eval_chat ppl (German, uncalibrated) | eval_code ppl | prefill tok/s |
+  |---|---|---|---|
+  | base, no prune (s7, ran WITH the gallocr bug) | 5.633 | 3.676 | 86-90 |
+  | hard REAP 25% | 8.949 (+59%) | **3.564** | 161 (code) |
+  | hard random 25% (control) | - | 4.289 (+20% vs REAP) | 170 |
+  | soft 0.02 + adapt | **5.457** | - | 89 |
+  | soft 0.05 + adapt | 5.516 | 3.583 | 97-102 |
+  | soft 0.10 + adapt | 5.528 | - | 114 |
+
+  Soft prune gets back all of the uncalibrated-language loss (8.95 -> 5.46-5.53) while code stays within 0.5% of
+  hard. The REAP choice matters (random costs +20% on code). **Caveat:** the base row predates the allocator fix
+  (s8 moved chunked ppl by ~4%), so "soft < base" isn't established. Re-take base on the next block.
+- **Decode** (eval_code300, -n 32, margin 1, soft 0.05 + adapt): **7.57 tok/s** vs 10.38 for the hard 4-domain 25%
+  list (sm0). Experts 114 vs 78 ms/token: 282 file-tier reads, 211 arena swaps, 43 ms/pass file reads, cpu-pool wall
+  98 vs 73 ms. Over 32 tokens that is adapt warming up / thrashing. Prefill also drops 161 -> ~100 tok/s.
+- Next: re-take the no-prune base; longer decode (256+ tokens) to see whether adapt settles; an admission gate (DS4
+  research, Infernix: promote a file-read expert only if its decayed hit count beats the coldest arena expert, not
+  on first read); try soft 0.02 on code + decode.
+- Process: two copies of chain5 overlapped for ~1 min (a queued job still in its `sleep 120` was missed by the
+  process check). memguard.sh already takes ds4-gpu.lock for each run, so an outer `flock` on the same lock
+  deadlocks: never wrap memguard runs in it. c5-hard-chat.log was truncated by the duplicate's start; its ppl
+  (8.9493) came from the monitor (`c5-hard-chat.note`).

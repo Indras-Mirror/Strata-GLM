@@ -1,0 +1,19 @@
+memguard: scope ds4-guard-136409 MemoryMax=84G swap=0 floor=4 GiB (avail 83 GiB)
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24080 MiB):
+  Device 0: NVIDIA GeForce RTX 4090, compute capability 8.9, VMM: yes, VRAM: 24080 MiB
+dense backend: CUDA0
+glm5-next: 45 layers (34 KDA, 11 MLA), 288 experts top-8, vocab 154880; dense half loaded in 1.9 s
+slots auto: 17.12 GiB free after the dense half -> 11.62 GiB of expert slots (margin 5.50 GiB)
+prune: 3024 (layer, expert) pairs masked out of routing (bench/glm-2026-10-09/prune-ezct-0.25.txt)
+tier: gpu, 1510 resident slots, arena 63.3 GiB (7562 experts), file tier 0; load 34.2 s
+prefill 1024/2000 tokens | 93.0 tok/s | 11 s elapsed, ETA 10 s   prefill 2000/2000 tokens | 99.1 tok/s | 20 s elapsed, ETA 0 s   
+ppl: 1999 positions, mean NLL 1.70767, perplexity 5.5161
+18831
+
+prefill: 2000 tokens in 20.63 s = 96.94 tok/s (chunked)
+prefill chunks of 1024: attention+router 936 ms, experts 17041 ms, finish 197 ms, head/ppl 1972 ms
+decode : 1 tokens, 1 forward passes in 0.00 s = 11048.26 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+tier ms/token: wall 0.00 (gpu hits 0.00, pcie 0.00, cpu pool 0.00)
+VRAM free at the end: 4.76 GiB
