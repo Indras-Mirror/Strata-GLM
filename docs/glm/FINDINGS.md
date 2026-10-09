@@ -592,3 +592,69 @@ pre-merge 15.69 tok/s, merged **16.25 tok/s = +3.6%** -> the merge does NOT regr
 slightly faster. The "20.65 tok/s at skip-miss 0.15" recorded in s18 was a FILE-TIER-0 run - the ~16 vs ~20.6 gap
 is residency (file tier 146 vs 0, i.e. how much of the expert set fits the arena), NOT the merge. Always compare at
 the same file tier (the tier line prints it).
+
+## s23 (2026-10-10): the abliteration BAKE is not viable; --renorm-skip makes skip+ablation possible; the X(12) merge gap
+
+**1. Baking the rank-1 LoRA into the quantized weights does NOT work (measured, not guessed).** Built
+`tools/glm/lora_bake.cpp` (matches glm_lora.hpp: `y += b*(a.x)`; dequant -> add delta -> requant to the SAME type).
+Round-trip on real tensors (`delta_retained = ||W_baked-W|| / ||W_ideal-W||`; 1.0 = faithful):
+| tensor | type | delta/W | bake-drift/W | delta_retained |
+| --- | --- | --- | --- | --- |
+| blk.10.ffn_gate_exps (CONTROL, delta == 0) | q2_k | 0.0000 | 0.0199 | -- |
+| blk.4.ffn_down_exps | q4_k | 0.0018 | 0.0054 | 3.06 |
+| blk.10.ffn_down_exps | q2_k | 0.0106 | 0.0220 | 2.08 |
+| blk.20.ffn_down_exps | q2_k | 0.0321 | 0.0312 | 0.97 |
+| blk.20.attn_output | q4_k | 0.0067 | 0.0035 | 0.52 |
+| blk.20.ffn_down_shexp | q4_k | 0.0871 | 0.0922 | 1.06 |
+The abliteration deltas are 0.2-1% of the weight norm -> below the quantizer step, so a requant either dilutes
+(attn_output keeps 52%) or drowns (down experts 2-3x) them; and the ZERO-delta control proves a 2% requant DRIFT
+(GSQ's grid != ggml's q2_k grid -> even a no-op bake perturbs the base). This reproduces the s20 "mixed ablation ->
+loop" failure mode. **Verdict: keep the RUNTIME LoRA; do not bake at q2_k/q4_k.** (Only routed-expert down_proj,
+shexp down and attn_output carry deltas - gate/up exps are ZERO placeholders, matching the adapter README's 7,545
+effective modules.)
+
+**2. --renorm-skip (new, default OFF): rescale the MoE sum by the surviving weight fraction after a drop.**
+s21's magnitude-error lead, implemented at `gpu_run` (:1660-1679, decode host sum) and `gpu_run_chunk` (per-token
+`c_w` pre-scale, :1969-1996 + :2424-2432). Exactly 1.0 when nothing is dropped -> byte-identical for no-drop runs.
+`--lora-exps` no longer forces skip->0 when `--renorm-skip` is set (`glm_generate.cpp:326`), so ablated+skip is testable.
+Gates (eval_code, 1999 pos, skip 0.15, arena 72 GiB, prune-ezct-0.25):
+| pass | model | skip | renorm | ppl |
+| --- | --- | --- | --- | --- |
+| a-off | stock | 0.15 | off | 3.6206 |
+| a-on | stock | 0.15 | ON | 3.6090 |
+| b-off | ablated | 0 (forced) | off | 3.5943 |
+| b-on | ablated | 0.15 kept | ON | 3.5899 |
+=> renorm does not regress (stock improves -0.32%); ablated at skip 0.15 is no worse than skip 0 (3.5899 vs 3.5943).
+The b-on stderr shows only the `pcie_frac -> 1.0` notice (NOT skip->0) and `moe lora: deltas on 26 layer(s)` -> the
+ablation was active WITH skip on. **Behavioral loop gate (s20 keylogger prompt, live server
+`strata-glm-unc-ablated-renorm.json`, effort low, max_tokens 900): PASS** - a complete, coherent Python keylogger
+(2542 chars of content, **0** "LPVOID" repeats, no repetition loop). `finish=length` only because it hit the 900-token
+budget mid-answer, not the s20 degenerate loop. **So ablated + skip 0.15 + renorm works** - the s20 loop is fixed.
+- NOTE the arena load is 236-411 s on this box (vs 93 s in the um run) - each ppl pass is ~6-7 min.
+- Rollback: default off -> no change unless `--renorm-skip` is passed; revert the commit otherwise.
+
+**3. The X(12) merge gap (a real bug s22's doc hid).** s22 wrote "GLM's Q4_K down_exps is X(12) -> tier init
+otherwise fails", but the fix was **never committed** - it existed only as an uncommitted change in the
+`~/AI/Strata-GLM-um` worktree. So the merged `glm` branch's build could not load the model at all:
+`tier init: native_expert_grouped has no kernel for layer 3's types 12/12/12`. Applied to
+`src/kernels/cuda/iq_kernels.cu:736` (`STRATA_D_FMTS_FORK(X) X(10) X(11) X(12) X(39)`) - **UNCOMMITTED**.
+Lesson: a worktree's dirty tree is NOT the branch - verify the fix is in a commit before trusting "gates green".
+
+## s24 (2026-10-10): abliterated GLM-5.3-Flash - what exists, and how small a self-made RCO/GSQ could be
+Asked whether to find an abliterated GLM-5.3-Flash and RCO/GSQ it ourselves. HF has ~52 "uncensored GLM-5.3-Flash"
+repos. Smallest first: Asilarkness NVFP4-pruned **62 GB** (CUDA-only); huihui-ai abliterated GGUF **93 GB** (UD-IQ1_S)
+/ 102 (IQ2_XXS) / 120 (IQ3_XXS) / 157 (IQ4_XS) - abliterates layers 15-35 ONLY, **all experts untouched**, not RCO;
+MikeRoz EXL3 2.51/3.05/4.05 bpw (exllama); **GCSA-AiLab/GLM-5.3-Flash-Uncensored-RCO-GSQ-GGUF** = our exact stack
+(RCO+GSQ, LoRA-v2 merged) but only Q4 **137 GB** / Q8 333 GB. orcarouter/dealignai FP8 ~320 GB / NVFP4. **Nobody has
+published an uncensored GSQ-RCO GLM at 2-3 bit.**
+- Why huihui is the wrong source: its abliteration leaves every expert un-ablated - and the gcsa README (our adapter)
+  reports GLM-5.3-Flash refusals live in the routed-expert down_proj writers, while attention/dense-only interventions
+  "retain most refusal behavior". So a huihui quant is neither small (120 GB > our 113.6 GB) nor correctly ablated.
+- Size math (parsed from our GGUF): 313B params / 113.6 GB / 2.90 bpw; **EXPERTS = 304.4B params = 107.2 GB (97% of the
+  model)**, non-expert only 8.9B / 6.4 GB. So the RCO/GSQ lever is entirely the expert precision: all-ternary experts
+  -> 60 GB (+6.4) = **~66 GB**; ternary g/u + Q2_K down = ~80 GB; DS4 recipe (IQ2_XXS g/u + Q2_K down) = ~92 GB; all
+  Q2_K = ~106 GB. Ternary needs IQ1_S/IQ1_M kernels in the GLM native expert path (no PTQ1_0 in this fork).
+- GSQ needs the full-precision weights; no BF16 uncensored exists -> merge our r=1 LoRA into zai-org BF16 (~640 GB),
+  or use orcarouter FP8-uncensored (~320 GB, slightly lossy), or GSQ on top of an existing GGUF (the paper supports
+  it). Disk is the blocker (49 GB free on NVMe1TB; SSD NVME 163 GB is the roomiest).
+- **Recommendation: don't re-quantize.** The runtime LoRA + `--renorm-skip` is the cheaper path to ablated+fast.

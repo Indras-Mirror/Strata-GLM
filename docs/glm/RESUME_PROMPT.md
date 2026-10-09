@@ -17,7 +17,33 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
 `docs/glm/FINDINGS.md`; then the DS4 docs we build on: `docs/ds4/RESUME_PROMPT.md` (rules, gates, lessons),
 `docs/ds4/ENGINE_DENSE.md`, `docs/ds4/ENGINE_MOE.md`; `git log --oneline -15`.
 
-## State (2026-10-10) - **CURRENT: UPSTREAM MERGED** (supersedes the 2026-10-09 block below)
+## State (2026-10-10 PM) - **CURRENT: abliteration-fast is close; BAKE REJECTED; the X(12) gap found** (supersedes the merge block below)
+**UNCOMMITTED in `~/AI/Strata-GLM` (branch `glm`) - nothing pushed.** Three changes live in the working tree:
+1. `src/kernels/cuda/iq_kernels.cu:736` - added `X(12)` to `STRATA_D_FMTS_FORK` (Q4_K down_exps, layers 3-5). WITHOUT
+   this the merged build cannot load the model (`tier init: native_expert_grouped has no kernel for layer 3's 12/12/12`).
+   s22 documented it but it was NEVER committed - it lived only in the `~/AI/Strata-GLM-um` dirty tree. **Required for
+   glm to serve at all.**
+2. `tools/ds4/ds4_moe.hpp` + `tools/ds4/ds4_moe.cpp` + `tools/glm/glm_generate.cpp` - **`--renorm-skip`** (default OFF):
+   rescale the MoE sum by Sum(all w)/Sum(kept w) after a skip drop (decode `gpu_run`:1660-1679; chunks `gpu_run_chunk`
+   `c_w` pre-scale :1969-1996, :2424-2432). `--lora-exps` no longer forces skip->0 when `--renorm-skip` is set.
+3. `tools/glm/lora_bake.cpp` (new tool) + the bake measurement - FINDINGS s23. **Verdict: DO NOT bake** - the rank-1
+   delta is below the q2_k/q4_k resolution and a same-type requant even drifts a ZERO-delta tensor 2% (GSQ grid != ggml).
+
+**Gates (FINDINGS s23):** renorm does NOT regress - stock skip0.15 ppl 3.6206 -> **3.6090** (renorm ON); ablated b-off
+3.5943 -> b-on (**skip 0.15 KEPT**, renorm ON) **3.5899**. Build: `build-glm-gpu/glm_generate` 679 MB / 3117 cubins.
+**Loop gate PASSED (09:24)** - ablated + skip 0.15 + renorm gave a complete coherent keylogger answer (2542 chars
+content, **0** "LPVOID" repeats; `finish=length` only because it hit the 900-token budget). **ablated + skip 0.15 works**
+(`bench/glm-2026-10-09/renorm-loop.summary`, `renorm-abl-probe.txt`) - the s20 loop is fixed.
+
+**NEXT (in order):**
+1. Adopt `strata-glm-unc-ablated-renorm.json` for the ablated server and A/B decode tok/s at skip 0.15
+   (~20 vs the current ~15-18 with skip forced off). If it ever loops again, the levers are (a) unify the prefill/decode
+   skip rules, (b) teach the MMQ chunk path the deltas (`ds4_moe.cpp:2145-2180` builds no `plo`).
+3. **COMMIT the three changes to `glm`** (Mal's call) - the X(12) one is needed for glm to serve at all.
+4. Abliterated-model research is in FINDINGS s24 (don't re-quantize; huihui skips the experts so it's the wrong source;
+   ternary expert floor ~66 GB if we ever do). Note a ppl pass is now ~7 min (arena load 236-411 s on this box).
+
+## State (2026-10-10) - **UPSTREAM MERGED** (superseded by the block above)
 **glm is now a real descendant of upstream Strata.** `glm` == `87cd462f`, a MERGE whose second parent is
 `upstream/main` (fb58e0db), so from here a plain `git merge upstream/main` syncs - no graft, no rebase.
 **Local only, NOT pushed.** (DS4 did the same: deepseek4 = 497dbd47 contains merge cc55d4c9.)
