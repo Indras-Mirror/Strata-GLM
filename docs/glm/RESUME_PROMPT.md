@@ -250,3 +250,34 @@ are the starting points).
 - Test the real model end to end early (quality + tok/s), fix after; keep the gates mutation-tested.
 - Keep results in `bench/glm-YYYY-MM-DD/`, update `docs/glm/FINDINGS.md` + this file at milestones, say what was NOT
   tested.
+
+## UPSTREAM RE-BASE (2026-10-10) - the way to get the upstream features into our engine
+The table items (Foresight prefetch, MMVQ_IL rows table + sm_89, --expert-cache-per-layer, prefill CPU share,
+page-lock #1250, Gumbel drafts) are all in upstream/main, but our fork CANNOT `git merge` it: upstream rewrote
+history on 2026-10-06 (docs/TROUBLESHOOTING.md #1276), so the histories are unrelated. The working path is a
+3-WAY merge with our fork's ORIGINAL upstream as the base:
+    BM=$(git merge-base HEAD origin/main)          # = 6f32ec07 (2026-10-04), our pre-fork upstream
+    git merge-tree --write-tree --merge-base=$BM glm upstream/main
+That produces exactly **8 conflicts** (verified 2026-10-10): CMakeLists.txt, README.md,
+src/kernels/cpu/{iq_avx2,native_expert,pool}.cpp, src/kernels/cuda/iq_kernels.cu, src/prefill/moe_mmq.cu,
+tools/strata_tokenizer.py - i.e. only where OUR kernel additions and upstream's changes overlap. Everything else
+auto-merges, and the merged tree carries upstream's features.
+
+Re-base recipe (SAFE - on a scratch worktree, `glm` stays green):
+  1. `git worktree add -b glm-rebase ~/AI/Strata-GLM-rebase upstream/main` (upstream/main was fetched from
+     ~/AI/Strata; the `upstream` remote = Niko1221/Strata already exists in our repo).
+  2. `git checkout glm -- tools/ds4 tools/glm`  (engines are DISJOINT from upstream: upstream has no tools/ds4|glm)
+  3. Append to the root CMakeLists the 2 include() lines (tools/ds4/cmake/ds4_moe.cmake, tools/glm/cmake/glm.cmake).
+  4. Symlink third_party/llama.cpp -> the main worktree's copy (glm.cmake hardcodes that path for ggml-impl.h).
+  5. Configure: `-DSTRATA_ENABLE_CUDA=ON -DSTRATA_MMQ_KQUANTS=ON -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89
+     -DFETCHCONTENT_SOURCE_DIR_STRATA_LLAMACPP=<third_party/llama.cpp>`. VERIFIED: all targets present
+     (strata_kernels, strata_mmq, ds4_moe_cuda, glm_generate) and glm_dense.cpp compiles CLEAN against
+     upstream/main's headers.
+  6. Then do the real 3-way merge (step above) into that worktree, resolve the 8 conflicts (keep BOTH sides), build,
+     and run our gates (code/chat ppl, the decode-loop gate, the abliteration gate). Rollback: `git worktree remove
+     ~/AI/Strata-GLM-rebase && git branch -D glm-rebase`.
+Overlap, measured: the shared surface is include/ + src/ (188 files; our fork added ~3391 lines on an older upstream
+snapshot). Engines (tools/ds4, tools/glm) are 100% ours. Features are env-gated upstream (STRATA_FS_SLOTS /
+FS_AHEAD / PREFILL_CPU_SHARE / MMVQ_IL_ROWS / STAGE_PIN) so nothing changes until switched on. Foresight + prefill
+CPU share need ENGINE-SIDE wiring (their wiring lives in upstream's src/program/generate.cpp, which we do not build).
+COORDINATE with strata-ds4-gpu: we share include/+src/, so this re-base should be done ONCE for both engines.
