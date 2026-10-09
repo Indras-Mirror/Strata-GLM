@@ -12,7 +12,8 @@
 # Context: 524288 (512K; MLA latent cache ~6 GB VRAM, fewer expert slots -> decode ~7-9 tok/s)
 # Multi-turn: the engine snapshots the state at the end of every prompt; a follow-up that extends it reads only the
 #          new tokens.
-# Usage:   strata-glm-quetza [--stock] [--port=N] [-- <quetza args>]
+# Usage:   strata-glm-quetza [--stock] [--fast] [--full] [--port=N] [-- <quetza args>]
+#          --fast: --skip-miss 0.15 -> decode ~20.6 tok/s (vs ~9.7), a quality cost (see FINDINGS)
 # ============================================================================
 set -eE
 WRAPPER_NAME="strata-glm-quetza"
@@ -20,10 +21,14 @@ GLM_DIR="/home/mal/AI/Strata-GLM"
 PY="/home/mal/AI/Strata/.venv/bin/python"
 SHIM="$GLM_DIR/tools/glm/serve/serve_glm.py"
 CONFIG_UNC="$GLM_DIR/tools/glm/serve/strata-glm-unc.json"
+CONFIG_FAST="$GLM_DIR/tools/glm/serve/strata-glm-unc-fast.json"
 CONFIG_STOCK="$GLM_DIR/tools/glm/serve/strata-glm.json"
+CONFIG_ABLATED="$GLM_DIR/tools/glm/serve/strata-glm-unc-ablated.json"   # full routed-expert abliteration + skip 0.15 + --renorm-skip
 CONTEXT_SIZE=524288
 LOCAL_HOST="127.0.0.1"
 UNCENSORED=1
+FAST=0
+FULL=0
 PORT_SET=0
 QUETZA_ARGS=()
 for arg in "$@"; do
@@ -31,10 +36,16 @@ for arg in "$@"; do
         --port=*)            LOCAL_PORT="${arg#--port=}"; PORT_SET=1 ;;
         --stock|--censored)  UNCENSORED=0 ;;
         --uncensored|--unc)  UNCENSORED=1 ;;
+        --fast)              FAST=1; UNCENSORED=1 ;;   # --skip-miss 0.15: 2x decode, a quality cost
+        --full|--ablated-full) FULL=1; UNCENSORED=1 ;;   # full routed-expert ablation + skip 0.15 + --renorm-skip
         *)                   QUETZA_ARGS+=("$arg") ;;
     esac
 done
-if [ "$UNCENSORED" = 1 ]; then
+if [ "$FULL" = 1 ]; then
+    CONFIG="$CONFIG_ABLATED"; [ "$PORT_SET" = 0 ] && LOCAL_PORT=8140; MODEL_NAME="glm-5.3-flash-strata-ablated-full"
+elif [ "$FAST" = 1 ]; then
+    CONFIG="$CONFIG_FAST"; [ "$PORT_SET" = 0 ] && LOCAL_PORT=8140; MODEL_NAME="glm-5.3-flash-strata-abliterated-fast"
+elif [ "$UNCENSORED" = 1 ]; then
     CONFIG="$CONFIG_UNC"; [ "$PORT_SET" = 0 ] && LOCAL_PORT=8140; MODEL_NAME="glm-5.3-flash-strata-abliterated"
 else
     CONFIG="$CONFIG_STOCK"; [ "$PORT_SET" = 0 ] && LOCAL_PORT=8141; MODEL_NAME="glm-5.3-flash-strata"
