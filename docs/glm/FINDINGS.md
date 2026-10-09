@@ -530,3 +530,45 @@ skip identically) to win the speed back.
 
 **Untested / open:** the other refusal categories (only the keylogger prompt was run); adapter v1; and the reference
 cross-check (llama.cpp's glm5next LoRA on the same GGUF+adapter) - the way to confirm our application matches upstream.
+
+## s21 (2026-10-10): skip-miss quality curve + MTP REJECTED by measurement (the MoE verify does not amortize)
+
+**skip-miss is NOT free above ~0.15.** Decode-loop ppl (`bench/glm-2026-10-09/run-30plus.sh ppl`, eval_code300, 299
+positions; loop-vs-loop is the only valid comparison - decode is the path skip touches):
+| skip-miss | decode tok/s | loop ppl | vs 0.15 |
+| 0.15 | 20.65 | 13.73 (13.31 in a 2nd run) | - |
+| 0.20 | ~22 | 15.91 | +16% |
+| 0.25 | 24.44 | 17.49 | +27% |
+| 0.30 | ~26 | 18.26 | +33% |
+| 0.45 | 30.21 | 19.06 | +39-43% |
+| 0.50 | 31.20 | 19.96 | +45% |
+30+ IS reachable by skip-miss alone (0.45 -> 30.21, 0.50 -> 31.20 tok/s, prefill ~166), but it costs ~40-45% ppl. The
+only previously gated value was 0.15 (+0.21% code / -0.97% chat, s18); the 0.15->0.45 stretch is steep. **The resume's
+"30+ needs no MTP, just gate a higher skip-miss" is REFUTED - the gate fails.**
+
+**MTP is REJECTED - measured, not inherited.** The verify is a BATCHED forward of k+1 tokens; measured the batched cost
+(prefill-chunk path on a 96-token prompt, `bench/glm-2026-10-09/mtp-econ.sh`, `econ-*.log`) against a sequential decode
+at the same flags:
+| batched forward | per-token | r_verify (vs decode) |
+| decode (sequential) | 55.8 ms | 1.00 |
+| chunk 6 | 95.1 ms | 1.70 |
+| chunk 8 | 88.4 ms | 1.58 |
+| chunk 16 | 69.8 ms | 1.25 |
+| chunk 1024 | 6.0 ms | 0.107 |
+The batched forward is MORE expensive per token at every spec-relevant k, because a k-token batch touches ~k x more
+DISTINCT experts (MoE, 288/layer): the memory-bound expert FETCH scales with k and only amortizes once the batch is
+large enough that experts recur (`chunk 1024` = 6 ms/token shows the reuse exists, but only at k >> 16). In the runs the
+expert arm dominated (`chunk 8`: experts 8016 ms of 8491 ms). Speedup = E[accepted]/(k * r_verify):
+| k | E[acc] @ alpha=0.72 | r_verify | speedup |
+| 6 | 3.21 | 1.70 | 0.31x |
+| 8 | 3.34 | 1.58 | 0.26x |
+| 16 | 3.56 | 1.25 | 0.18x |
+So spec 4-6 (and 16) is a 0.2-0.3x LOSS. This CONFIRMS and quantifies s7's "MTP ~0.9x" on the CURRENT profile (the regime
+did not change enough - a small-batch verify is still fetch-dominated). Do NOT build the MTP pipeline for
+GLM-5.3-Flash on this tier unless the expert set becomes batch-reusable (e.g. far more VRAM residency).
+
+**Open lead (untested, cheap):** skip_miss zeroes a dropped expert's weight but the MoE sum is NOT renormalized
+(`ds4_moe.cpp:1660-1669` sums `wloc[k]*p[k]` with no divide by the surviving weight sum), so dropping experts scales the
+layer output DOWN by the dropped weight fraction - a systematic magnitude error that grows with the dropped fraction and
+shadows the ppl curve. Renormalizing by the surviving sum is a small change and could make skip-miss near-free at higher
+values (and possibly compatible with the routed LoRA). NOT tested.
