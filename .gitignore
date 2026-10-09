@@ -61,5 +61,10 @@ build-vision-cuda12.bat
 *.done
 /third_party/*.zip
 
+# IDEs
+.vscode/
+.idea/
+.cursor/
+
 /.ccache/
 /.rocm-win/

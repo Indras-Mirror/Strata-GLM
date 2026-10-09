@@ -6,11 +6,18 @@
 #                   as well; the gate itself stays CPU-only and never initialises CUDA.
 
 if(TARGET ggml-cpu)
+    # ggml-impl.h lives in the ggml tree the build uses: STRATA_GGML_DIR when given (a git worktree has no
+    # third_party/llama.cpp of its own), else the in-tree copy
+    if(STRATA_GGML_DIR)
+        set(_ds4_ggml_src ${STRATA_GGML_DIR}/ggml/src)
+    else()
+        set(_ds4_ggml_src ${CMAKE_CURRENT_SOURCE_DIR}/third_party/llama.cpp/ggml/src)
+    endif()
     add_library(ds4_dense STATIC tools/ds4/ds4_dense.cpp)
     target_include_directories(ds4_dense PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/tools/ds4
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/llama.cpp/ggml/src)   # ggml-impl.h (graph uid)
+        ${_ds4_ggml_src})   # ggml-impl.h (graph uid)
     target_link_libraries(ds4_dense PRIVATE ggml ggml-cpu ggml-base)
 
     add_executable(test_ds4_dense tools/ds4/test_ds4_dense.cpp)
