@@ -788,3 +788,25 @@ itself - PCIe costs 0.37 ms/expert and is just as serial.
 
 Cheap, no-numerics-change candidate first: (c), then (b).  Both are checkable by ppl parity (X-* arms) + the nsys
 sync count, NOT by wall time alone.
+
+## s26 gate 3-4 (2026-10-10 19:34-20:30: maya-improve3.summary, maya-final.summary)
+Maya+LoRA, census, pcie auto, elastic cache, chunk 12736-token chat prompt -> 256 tokens (all coherent):
+
+| arm | prefill tok/s | decode tok/s | slots after grow |
+|---|---|---|---|
+| M el4k q5 dense | 396.4 | 24.38 | 1489 |
+| M el4k q6 (as shipped) | 392.6 | 23.99 | 1336 |
+| N el6k q5 | 432.8 | 24.91 | 1422 |
+| O el4k q5 512K | 389.4 | 24.77 | 1120 |
+| final R300-4k (+indexer NW fix) | 388.6 | 24.49 | 1470 |
+| final R300-4k --pf-b 0 | 391.1 | 23.81 | 1479 |
+| final R300-6k | 429.4 | 24.38 | 1403 |
+
+- release_big works: the 6K chunk now costs decode ~nothing (L before the fix: 23.1 at 1231 slots).
+- The indexer NW fix did not move decode measurably (R300-4k 24.49 vs M 24.38): its padding work was cheap.
+- Prefetch OFF is slower (-2.8%): keep --pf-b default.
+- ppl with skips ON is noise-confounded by residency (q5 chat 5.73 / code 3.66 vs q6 5.34 / 3.72; q4 5.61 / 3.71):
+  gate 4's X-* arms measure the requant with exact math (no skips).
+- nsys decode profile (gate 3, mi3-decode*.csv): host->device copies ~24 ms/token of copy-engine time, ~575 MB/token
+  (prefetch ~60 experts/token issued, ~45 used + PCIe misses); 355 cudaStreamSynchronize/token (75 us avg) -> the
+  next decode lever is fewer per-layer host syncs (GPU-resident routing for VRAM-hit layers), not more bandwidth.
