@@ -54,6 +54,7 @@ struct Args {
     bool serve = false;              // --serve: Strata's engine line protocol on stdin/stdout (serve/server.py)
     bool lora_exps = false;          // --lora-exps: also apply the adapter's routed-expert (ffn_*_exps) deltas
     bool renorm_skip = false;        // --renorm-skip: rescale the MoE sum by the surviving weight fraction after a drop
+    bool arena_lazy = false;         // --arena-lazy: fill the RAM arena in the background; serve (file tier) meanwhile
     bool ppl = false, vram_lru = false, arena_adapt = false, arena_skip = false;
     int prefill_chunk = 0;           // --prefill-chunk N: the prompt in passes of N tokens (0 = the decode loop)
     bool chunk_mmq = false, chunk_prestage = false, allow_long = false;
@@ -113,6 +114,7 @@ bool parse(int argc, char ** argv, Args & a) {
         else if (k == "--skip-file") a.skip_file = (float) std::atof(next().c_str());
         else if (k == "--skip-file-prefill") a.skip_file_chunk = (float) std::atof(next().c_str());
         else if (k == "--renorm-skip") a.renorm_skip = true;
+        else if (k == "--arena-lazy") a.arena_lazy = true;
         else if (k == "--arena-admit") a.arena_admit = (float) std::atof(next().c_str());
         else if (k == "--prune-penalty") a.prune_penalty = (float) std::atof(next().c_str());
         else { std::fprintf(stderr, "glm_generate: unknown argument %s\n", k.c_str()); return false; }
@@ -177,7 +179,7 @@ int main(int argc, char ** argv) {
                              "       [--route-bias X] [--ctx N] [--temp 0] [--stop id,id] [--ppl] [--dump-logits f] [--dump-routes f]\n"
                              "       [--lora adapter.gguf] [--prefill-chunk N [--chunk-mmq] [--chunk-prestage]] [--allow-long-ctx]\n"
                              "       [--prune f [--prune-penalty X]] [--arena-adapt [--arena-admit HALF_LIFE_TOKENS]]\n"
-                             "       [--skip-miss T] [--skip-file T] [--skip-file-prefill T] [--renorm-skip] [--vram-grow KEEP_GIB]\n"
+                             "       [--skip-miss T] [--skip-file T] [--skip-file-prefill T] [--renorm-skip] [--arena-lazy] [--vram-grow KEEP_GIB]\n"
                              "       [--lora-exps] (with --lora: also apply the routed-expert ffn_*_exps deltas)\n");
         return 2;
     }
@@ -311,6 +313,7 @@ int main(int argc, char ** argv) {
     if (a.arena_admit > 0.0f) mc.arena_adapt = true;
     mc.skip_miss = a.skip_miss;   // decode: drop a VRAM-miss expert weighing < skip_miss x the token's weight sum
     mc.renorm_skip = a.renorm_skip;   // rescale the sum by the surviving weight fraction (default off)
+    mc.arena_lazy = a.arena_lazy;     // fill the arena in the background (serve off the file tier meanwhile)
     mc.lora = lora_host.empty() ? nullptr : lora_host.data();   // routed-expert deltas (--lora-exps)
     if (a.lora_exps) {
         mc.pcie_frac = 1.0;   // the deltas apply on the GPU grouped path only: every miss goes there

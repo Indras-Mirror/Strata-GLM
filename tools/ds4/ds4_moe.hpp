@@ -263,6 +263,11 @@ struct Ds4MoeConfig {
     /// scaled by Sum(all w) / Sum(kept w) per token (exactly 1.0 when nothing is dropped, so no-drop runs are
     /// unchanged).  Decode: a scalar on the host sum; chunks: c_w pre-scaled before weighted_rows_sum.
     bool renorm_skip = false;
+    /// --arena-lazy (default off): build the arena's slot map and allocate it, but fill it in a BACKGROUND thread,
+    /// publishing each slot only after its bytes land.  The decode path reads a miss (the file tier) until then, so
+    /// the engine answers seconds after start instead of after the whole ~70 GiB fill.  Dev flag: the fill and the
+    /// decode run concurrently, and the hit-rate/seed accounting counts the planned arena from the start.
+    bool arena_lazy = false;
     /// Decode (MiMo and DS4): a PCIe-share miss (and a prefetched expert the routing used) takes
     /// the least-recently-used VRAM slot of its layer instead of a staging buffer, so the cache follows the
     /// conversation (route_probe sim, 1800 slots: static 40.5% held-out hit, LRU 61.6%; FINDINGS s16).  Same math per

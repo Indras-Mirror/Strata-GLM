@@ -108,6 +108,15 @@ struct Arena {
     int64_t n_layers = 0, n_experts = 0;
     bool from_ranked = false;       ///< built from a routing profile (not just index order)
     double seconds = 0.0;           ///< how long the fill took (the startup report wants this number)
+    /// --arena-lazy: the fill runs in the background and publishes each slot only AFTER its bytes land, so the
+    /// decode path reads a miss (the file tier) until then and answers seconds after start instead of waiting for
+    /// the whole fill.  `filler` is empty when the fill was blocking (the default); `fill_stop` ends it on close.
+    std::unique_ptr<std::thread> filler;   ///< --arena-lazy: the background fill (joined in close()/~Arena)
+    std::shared_ptr<std::atomic<bool>> fill_stop = std::make_shared<std::atomic<bool>>(false);
+    Arena() = default;
+    Arena(Arena&&) = default;
+    Arena& operator=(Arena&&) = default;
+    ~Arena() { if (filler && filler->joinable()) { fill_stop->store(true); filler->join(); } }
 
     const uint8_t* ptr(int64_t layer, int64_t expert) const {
         if (!base || layer < 0 || layer >= n_layers || expert < 0 || expert >= n_experts) return nullptr;
@@ -115,6 +124,7 @@ struct Arena {
         return s < 0 ? nullptr : (const uint8_t*) base + (size_t) off[(size_t) s];
     }
     void close() {
+        if (filler && filler->joinable()) { fill_stop->store(true); filler->join(); }
         owner.reset();
         base = nullptr;
         bytes = 0;
@@ -933,17 +943,37 @@ bool Ds4MoeTier::build_arena(const std::vector<std::pair<int32_t, int32_t>>& ran
     int nt = im_->cfg.threads > 0 ? im_->cfg.threads : 8;
     nt = std::min<int>(nt, 16);
     const double t0 = now_ms();
+    const int64_t n_fill = gp.arena.used;
+    const int64_t n_exp = im_->g.n_experts;
+    std::vector<std::pair<int32_t, int32_t>> fill_list = first;   // by value: a background fill outlives `first`
+    auto fill_ranges = [this, &gp, fill_list, n_fill, n_exp](std::atomic<int64_t>* next, bool publish) {
+        for (;;) {
+            if (gp.arena.fill_stop->load(std::memory_order_relaxed)) return;
+            const int64_t i = next->fetch_add(1);
+            if (i >= n_fill) return;
+            const int64_t l = fill_list[(size_t) i].first, e = fill_list[(size_t) i].second;
+            im_->blobs->read(l, e, (uint8_t*) gp.arena.base + (size_t) gp.arena.off[(size_t) i]);
+            if (publish)   // AFTER the bytes: a reader that sees the slot sees complete data
+                gp.arena.slot_of[(size_t) (l * n_exp + e)] = (int32_t) i;
+        }
+    };
+    if (im_->cfg.arena_lazy) {
+        // --arena-lazy: unfill every slot first (so misses go to the file tier), publish blob by blob in the
+        // background.  The caller returns now and serves; a slot becomes a hit only once its bytes are in.
+        for (int64_t i = 0; i < n_fill; ++i)
+            gp.arena.slot_of[(size_t) (fill_list[(size_t) i].first * n_exp + fill_list[(size_t) i].second)] = -1;
+        gp.arena.filler = std::make_unique<std::thread>([&, fill_ranges, nt]() {
+            std::atomic<int64_t> next{0};
+            std::vector<std::thread> th;
+            for (int c = 0; c < nt; ++c) th.emplace_back(fill_ranges, &next, true);
+            for (auto& t : th) t.join();
+        });
+        gp.arena.seconds = 0.0;
+        return true;
+    }
     std::atomic<int64_t> next{0};
     std::vector<std::thread> th;
-    for (int c = 0; c < nt; ++c)
-        th.emplace_back([&]() {
-            for (;;) {
-                const int64_t i = next.fetch_add(1);
-                if (i >= gp.arena.used) break;
-                im_->blobs->read(first[(size_t) i].first, first[(size_t) i].second,
-                                 (uint8_t*) gp.arena.base + (size_t) gp.arena.off[(size_t) i]);
-            }
-        });
+    for (int c = 0; c < nt; ++c) th.emplace_back(fill_ranges, &next, false);
     for (auto& t : th) t.join();
     gp.arena.seconds = (now_ms() - t0) / 1000.0;
     return true;
