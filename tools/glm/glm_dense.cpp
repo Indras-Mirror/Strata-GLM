@@ -282,6 +282,7 @@ struct GlmDense::Impl {
     ggml_tensor * i_tail = nullptr;      // F32 [(KP - 1) * NT] incomplete-pool cells per token (dump when absent)
     ggml_tensor * i_span = nullptr;
     std::vector<uint8_t> in_host;
+    bool bias_dirty = true;             ///< a route bias changed since the last upload (the first upload sends them)
     uint8_t * in_base = nullptr;
     int in_pos = -1, in_n = 0;
     int64_t in_cap = -1;
@@ -981,6 +982,7 @@ int GlmDense::snapshot_pos() const { return p_->snap_pos; }
 bool GlmDense::begin_tokens(const int * tids, int n) {
     Impl & im = *p_;
     if (!im.ensure_n(n)) return false;
+    if (!im.allo_init[(size_t) n]) im.allo_init[(size_t) n] = im.allo_for(n);   // after release_big
     if (!im.alloc(im.allo_init[(size_t) n], im.gf_init[(size_t) n])) { im.err = "gallocr(init) failed"; return false; }
     im.host_emb.resize((size_t) (im.D * n));
     for (int t = 0; t < n; ++t) {
@@ -1016,12 +1018,29 @@ bool GlmDense::predict(int il, int * top_ids, int n_top) {
     return true;
 }
 
+// The prompt chunks' shared compute buffer (allo_big, sized by the largest chunk) back to the device: after a prompt
+// its VRAM is the expert cache's for decode (s26 per-request elastic cache).  The cached graphs keep their plans;
+// the next chunk re-acquires an allocator (allo_for) and alloc() re-plans it (it forgets the stale pointers).
+void GlmDense::release_big() {
+    Impl & im = *p_;
+    if (!im.allo_big) return;
+    ggml_backend_synchronize(im.backend);
+    for (Impl::Layer & L : im.ly) {
+        for (Impl::Var & v : L.vars) if (v.allo == im.allo_big) v.allo = nullptr;
+        for (ggml_gallocr_t & a : L.allo_finish) if (a == im.allo_big) a = nullptr;
+    }
+    for (ggml_gallocr_t & a : im.allo_init) if (a == im.allo_big) a = nullptr;
+    ggml_gallocr_free(im.allo_big);
+    im.allo_big = nullptr;
+}
+
 void GlmDense::set_route_bias(int il, const float * bias) {
     Impl & im = *p_;
     if (il < 0 || il >= (int) im.ly.size()) return;
     Impl::Layer & L = im.ly[(size_t) il];
     std::memcpy(im.in_host.data() + ((uint8_t *) L.rbias->data - im.in_base), bias, (size_t) im.NEXP * 4);
     im.in_dirty = true;
+    im.bias_dirty = true;
 }
 
 bool GlmDense::attn_router_n(int il, int pos0, int n, int * routed_ids, float * routed_w, const float ** ffn_norm_host) {
@@ -1048,6 +1067,7 @@ bool GlmDense::attn_router_n(int il, int pos0, int n, int * routed_ids, float * 
     Impl::Var * var = nullptr;
     for (Impl::Var & v : L.vars) if (v.cap == cap && v.n == n && v.idx == idx) { var = &v; break; }
     if (!var) { build_attn(im, il, cap, n, idx); var = &L.vars.back(); }
+    if (!var->allo) var->allo = im.allo_for(n);   // after release_big
     if (!im.alloc(var->allo, var->gf)) { im.err = "gallocr(attn) failed"; return false; }
 
     // inputs: one upload per pass (positions or capacity changed, or a route bias was set)
@@ -1086,7 +1106,22 @@ bool GlmDense::attn_router_n(int il, int pos0, int n, int * routed_ids, float * 
             for (int64_t k = 0; k < KP; ++k) nidx[q * KP + k] = 0;
             ndst[q] = (int32_t) im.PCAP;
         }
-        ggml_backend_tensor_set(im.i_span, im.in_host.data(), 0, im.in_host.size());
+        // upload what this pass reads, not the whole span: the span is sized for the largest chunk (the mask alone is
+        // MCAP x NT F16 = 16 MB at NT 4096) and a decode step used to send all of it every token (s26: +2.7 ms/token)
+        auto put = [&](ggml_tensor * t, size_t bytes) {
+            const size_t off = (size_t) ((uint8_t *) t->data - im.in_base);
+            ggml_backend_tensor_set(im.i_span, im.in_host.data() + off, off, std::min(bytes, ggml_nbytes(t)));
+        };
+        put(im.i_slot, (size_t) n * 4);
+        if (dense && mcap <= im.MCAP) put(im.i_mask, (size_t) n * (size_t) mcap * 2);
+        put(im.i_tpos, (size_t) n * 4);
+        put(im.i_newidx, ggml_nbytes(im.i_newidx));
+        put(im.i_newdst, ggml_nbytes(im.i_newdst));
+        put(im.i_tail, (size_t) n * (size_t) (KP - 1) * 4);
+        if (im.bias_dirty) {
+            for (Impl::Layer & Lb : im.ly) put(Lb.rbias, ggml_nbytes(Lb.rbias));
+            im.bias_dirty = false;
+        }
         im.in_pos = pos0; im.in_n = n; im.in_cap = mcap; im.in_dirty = false;
     }
     if (ggml_backend_graph_compute(im.backend, var->gf) != GGML_STATUS_SUCCESS) { im.err = "attn graph compute failed"; return false; }
@@ -1120,6 +1155,7 @@ bool GlmDense::finish_layer_n(int il, int n, const float * routed_sum) {
         ggml_backend_tensor_set(im.routed_sum, routed_sum, 0, (size_t) (im.D * n) * 4);
     }
     if (!im.ensure_n(n)) return false;
+    if (!L.allo_finish[(size_t) n]) L.allo_finish[(size_t) n] = im.allo_for(n);   // after release_big
     if (!im.alloc(L.allo_finish[(size_t) n], L.gf_finish[(size_t) n])) { im.err = "gallocr(finish) failed"; return false; }
     if (ggml_backend_graph_compute(im.backend, L.gf_finish[(size_t) n]) != GGML_STATUS_SUCCESS) { im.err = "finish compute failed"; return false; }
     if (im.gate_taps)

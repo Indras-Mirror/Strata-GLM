@@ -1,0 +1,125 @@
+--- G-pcieauto (--ctx 307200 --prefill-chunk 1024 --vram-margin 5.5 --temp 0 --ids-file bench/glm-2026-10-09/prompts/chat_code6k.i32 -n 256 --pcie auto) 19:04:04 ---
+slots auto: 12.11 GiB free after the dense half -> 6.61 GiB of expert slots (margin 5.50 GiB)
+tier: gpu, 1002 resident slots, arena 53.5 GiB (8070 experts), file tier 0; load 78.8 s
+prefill: 12736 tokens in 56.87 s = 223.95 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 10.60 s = 24.06 tok/s
+experts/token: hit 35.3% (prefetched-useful 46.1/token of 60.1 issued), cpu 3.9%, pcie 3.9%, file tier 587, skipped 191.0/token
+decode ms/token: predict+prefetch 2.11, attention+router 17.85, experts 19.51, finish 1.31, head 0.65
+tier ms/token: wall 19.48 (gpu hits 5.36, pcie 5.01, cpu pool 7.58)
+  exit 0, VRAM peak 23764 MiB
+  text [225 ids]: 'Let me carefully analyze this code. The question: "Explain how a prompt processed in chunks here (what each does, what state is kept between, and how the KV cache and indexer are used), then point out concrete bug risk or inefficiency."\n\n me go through the code carefully.\n\n code is a C++ inference engine a hybrid-attention MoE modelGLM-5-next-like architecture with MLA (multi-layer attention /-head latent attention with a lightning indexer KDA (gated delta net linear attention), hyper-connection'
+--- H-q4dense (--ctx 307200 --prefill-chunk 1024 --vram-margin 5.5 --temp 0 --ids-file bench/glm-2026-10-09/prompts/chat_code6k.i32 -n 256 --pcie auto --dense-requant q4_k) 19:06:35 ---
+slots auto: 14.03 GiB free after the dense half -> 8.53 GiB of expert slots (margin 5.50 GiB)
+tier: gpu, 1292 resident slots, arena 51.6 GiB (7780 experts), file tier 0; load 131.6 s
+prefill: 12736 tokens in 55.41 s = 229.83 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 9.86 s = 25.87 tok/s
+experts/token: hit 42.0% (prefetched-useful 44.6/token of 60.1 issued), cpu 3.0%, pcie 3.6%, file tier 513, skipped 173.0/token
+decode ms/token: predict+prefetch 2.13, attention+router 15.76, experts 18.92, finish 1.21, head 0.48
+tier ms/token: wall 18.90 (gpu hits 6.30, pcie 4.51, cpu pool 6.30)
+  exit 0, VRAM peak 23762 MiB
+  text [225 ids]: 'Let me analyze this C++ inference engine code. The user is asking about how prompt is processed in chunks in this-attention MoE model (GL dense architecture with MLA/KDA attention hyperconnections, MoE routing, a lightning indexer).\n\nLet me trace the code to understand the architecture:\n\nArchitecture overview:**\n- This is GLM-5-next-style hybrid: some layers use KDA ( delta attention with gated delta net - attention with conv state), others use (multi-head latent attention with a indexer for spa'
+--- K-elastic4k (--ctx 307200 --prefill-chunk 4096 --vram-margin 7.5 --vram-grow 1.5 --temp 0 --ids-file bench/glm-2026-10-09/prompts/chat_code6k.i32 -n 256 --pcie auto --dense-requant q4_k) 19:09:56 ---
+slots auto: 13.45 GiB free after the dense half -> 5.95 GiB of expert slots (margin 7.50 GiB)
+tier: gpu, 909 resident slots, arena 54.1 GiB (8170 experts), file tier 0; load 137.6 s
+grow_cache: 909 -> 1412 slots (+503, 0 from the file tier) in 136 ms
+prefill: 12736 tokens in 31.87 s = 399.61 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 10.41 s = 24.49 tok/s
+experts/token: hit 41.4% (prefetched-useful 45.3/token of 60.1 issued), cpu 4.6%, pcie 2.4%, file tier 524, skipped 173.5/token
+decode ms/token: predict+prefetch 2.13, attention+router 18.44, experts 18.59, finish 1.01, head 0.48
+tier ms/token: wall 18.56 (gpu hits 5.99, pcie 3.22, cpu pool 8.04)
+  exit 0, VRAM peak 23236 MiB
+  text [225 ids]: 'Let me analyze this C++ inference engine code a hybrid-attention MoE modelGLM-5-next style, MLA attention + KDA/gated net layers + hyper-connections + indexer).\n\nThe question asks me to:\n1. How a prompt is in chunks (what each graph does what state is kept between chunks, the KV cache and indexer are used2. Point out one concrete bug or inefficiency\n\nLet me trace the code carefully.\n\n**Model architectureGlmDense):**\n- attention: layers are either KDAgated delta net, linear attention conv + state'
+--- L-elastic6k (--ctx 307200 --prefill-chunk 6144 --vram-margin 10 --vram-grow 1.5 --temp 0 --ids-file bench/glm-2026-10-09/prompts/chat_code6k.i32 -n 256 --pcie auto --dense-requant q4_k) 19:13:00 ---
+slots auto: 13.07 GiB free after the dense half -> 3.07 GiB of expert slots (margin 10.00 GiB)
+tier: gpu, 474 resident slots, arena 57.0 GiB (8606 experts), file tier 0; load 150.2 s
+grow_cache: 474 -> 1231 slots (+757, 0 from the file tier) in 205 ms
+prefill: 12736 tokens in 28.95 s = 439.88 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 11.03 s = 23.12 tok/s
+experts/token: hit 37.9% (prefetched-useful 45.8/token of 60.1 issued), cpu 4.6%, pcie 3.0%, file tier 593, skipped 183.2/token
+decode ms/token: predict+prefetch 2.13, attention+router 20.05, experts 19.42, finish 1.02, head 0.50
+tier ms/token: wall 19.40 (gpu hits 5.87, pcie 3.93, cpu pool 8.28)
+  exit 0, VRAM peak 22904 MiB
+  text [225 ids]: 'Let me analyze this C++ code carefully. user asks: "Explain how prompt is processed in chunks here ( each graph does, what state is between chunks, and how the KV and the indexer are used), then out one concrete bug risk or ineff."\n\nSo I need to explain:\n. How a prompt is processed in\n2. What each graph doesinit, attn, finish, predict3. What state is kept between\n4. How the KV cache indexer are used\n5. Point one concrete bug risk or inefficiencyLet me carefully read the code to the architecture.'
+--- I-bias02 (--ctx 307200 --prefill-chunk 4096 --vram-margin 7.5 --vram-grow 1.5 --temp 0 --ids-file bench/glm-2026-10-09/prompts/chat_code6k.i32 -n 256 --pcie auto --dense-requant q4_k --route-bias 0.02) 19:16:15 ---
+slots auto: 13.45 GiB free after the dense half -> 5.95 GiB of expert slots (margin 7.50 GiB)
+tier: gpu, 909 resident slots, arena 54.1 GiB (8170 experts), file tier 0; load 141.1 s
+grow_cache: 909 -> 1412 slots (+503, 0 from the file tier) in 136 ms
+prefill: 12736 tokens in 32.03 s = 397.57 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 11.04 s = 23.09 tok/s
+experts/token: hit 30.8% (prefetched-useful 49.8/token of 60.1 issued), cpu 5.9%, pcie 3.9%, file tier 476, skipped 199.3/token
+decode ms/token: predict+prefetch 2.10, attention+router 18.35, experts 21.11, finish 1.00, head 0.48
+tier ms/token: wall 21.08 (gpu hits 5.98, pcie 5.14, cpu pool 10.29)
+  exit 0, VRAM peak 23236 MiB
+  text [225 ids]: 'Let me look at this code carefully. The asks: "Explain how a is processed in chunks here (what graph does, what state is kept chunks, and how the KV cache the indexer are used), then point one concrete bug risk or inefficiencyWait — the user\'s message got off at the end: "then our one concrete bug risk..." Actually says "then point out one concrete risk or inefficiency." The user message ends with "then point out concrete bug risk or inefficiency" actually the user message ends with " point out '
+--- J-ctx512k (--ctx 524288 --prefill-chunk 4096 --vram-margin 7.5 --vram-grow 1.5 --temp 0 --ids-file bench/glm-2026-10-09/prompts/chat_code6k.i32 -n 256 --pcie auto --dense-requant q4_k) 19:19:24 ---
+slots auto: 11.03 GiB free after the dense half -> 3.53 GiB of expert slots (margin 7.50 GiB)
+tier: gpu, 540 resident slots, arena 56.6 GiB (8536 experts), file tier 0; load 152.2 s
+grow_cache: 540 -> 1043 slots (+503, 0 from the file tier) in 136 ms
+prefill: 12736 tokens in 32.45 s = 392.54 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 10.65 s = 23.94 tok/s
+experts/token: hit 37.3% (prefetched-useful 46.8/token of 60.1 issued), cpu 4.9%, pcie 2.7%, file tier 592, skipped 185.3/token
+decode ms/token: predict+prefetch 2.14, attention+router 18.39, experts 19.56, finish 1.02, head 0.48
+tier ms/token: wall 19.54 (gpu hits 5.98, pcie 3.57, cpu pool 8.61)
+  exit 0, VRAM peak 23224 MiB
+  text [225 ids]: 'Let me need to explain how a prompt is in chunks in this C++ inference (GlmDense, apparently GLM-5-next-style hybridattention MoE model with KDAMLA attention, hyper connections, a lightning indexer). The user asks explain how a prompt is processed in: what each graph does, what is kept between chunks, how the cache and indexer are used, and to point out one concrete bug risk inefficiency.\n\nLet me carefully reconstruct flow from the code and its naming**Overall architecture (from the code**\n\n- Th'
+--- Q-base-chat (--ctx 4096 --prefill-chunk 1024 --vram-margin 5.5 -n 1 --ppl --ids-file bench/glm-2026-10-09/prompts/eval_chat.i32 --pcie auto) 19:22:44 ---
+slots auto: 15.49 GiB free after the dense half -> 9.99 GiB of expert slots (margin 5.50 GiB)
+tier: gpu, 1515 resident slots, arena 50.1 GiB (7557 experts), file tier 0; load 58.5 s
+ppl: 1999 positions, mean NLL 1.67456, perplexity 5.3365
+prefill: 2000 tokens in 12.25 s = 163.29 tok/s (chunked)
+decode : 1 tokens, 1 forward passes in 0.00 s = 15347.07 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+tier ms/token: wall 0.00 (gpu hits 0.00, pcie 0.00, cpu pool 0.00)
+  exit 0, VRAM peak 22868 MiB
+--- Q-q4d-chat (--ctx 4096 --prefill-chunk 1024 --vram-margin 5.5 -n 1 --ppl --ids-file bench/glm-2026-10-09/prompts/eval_chat.i32 --pcie auto --dense-requant q4_k) 19:23:59 ---
+slots auto: 17.41 GiB free after the dense half -> 11.91 GiB of expert slots (margin 5.50 GiB)
+tier: gpu, 1801 resident slots, arena 48.2 GiB (7271 experts), file tier 0; load 117.6 s
+ppl: 1999 positions, mean NLL 1.72481, perplexity 5.6115
+prefill: 2000 tokens in 12.04 s = 166.05 tok/s (chunked)
+decode : 1 tokens, 1 forward passes in 0.00 s = 15679.14 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+tier ms/token: wall 0.00 (gpu hits 0.00, pcie 0.00, cpu pool 0.00)
+  exit 0, VRAM peak 22862 MiB
+--- Q-bias-chat (--ctx 4096 --prefill-chunk 1024 --vram-margin 5.5 -n 1 --ppl --ids-file bench/glm-2026-10-09/prompts/eval_chat.i32 --pcie auto --dense-requant q4_k --route-bias 0.02) 19:26:12 ---
+slots auto: 17.41 GiB free after the dense half -> 11.91 GiB of expert slots (margin 5.50 GiB)
+tier: gpu, 1801 resident slots, arena 48.2 GiB (7271 experts), file tier 0; load 115.9 s
+ppl: 1999 positions, mean NLL 1.73558, perplexity 5.6722
+prefill: 2000 tokens in 11.99 s = 166.80 tok/s (chunked)
+decode : 1 tokens, 1 forward passes in 0.00 s = 16533.85 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+tier ms/token: wall 0.00 (gpu hits 0.00, pcie 0.00, cpu pool 0.00)
+  exit 0, VRAM peak 22862 MiB
+--- Q-base-code (--ctx 4096 --prefill-chunk 1024 --vram-margin 5.5 -n 1 --ppl --ids-file bench/glm-2026-10-09/prompts/eval_code.i32 --pcie auto) 19:28:23 ---
+slots auto: 15.49 GiB free after the dense half -> 9.99 GiB of expert slots (margin 5.50 GiB)
+tier: gpu, 1515 resident slots, arena 50.1 GiB (7557 experts), file tier 0; load 57.3 s
+ppl: 1999 positions, mean NLL 1.31366, perplexity 3.7198
+prefill: 2000 tokens in 11.48 s = 174.15 tok/s (chunked)
+decode : 1 tokens, 1 forward passes in 0.00 s = 15597.70 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+tier ms/token: wall 0.00 (gpu hits 0.00, pcie 0.00, cpu pool 0.00)
+  exit 0, VRAM peak 22868 MiB
+--- Q-q4d-code (--ctx 4096 --prefill-chunk 1024 --vram-margin 5.5 -n 1 --ppl --ids-file bench/glm-2026-10-09/prompts/eval_code.i32 --pcie auto --dense-requant q4_k) 19:29:35 ---
+slots auto: 17.41 GiB free after the dense half -> 11.91 GiB of expert slots (margin 5.50 GiB)
+tier: gpu, 1801 resident slots, arena 48.2 GiB (7271 experts), file tier 0; load 115.4 s
+ppl: 1999 positions, mean NLL 1.31049, perplexity 3.7080
+prefill: 2000 tokens in 11.28 s = 177.38 tok/s (chunked)
+decode : 1 tokens, 1 forward passes in 0.00 s = 15068.87 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+tier ms/token: wall 0.00 (gpu hits 0.00, pcie 0.00, cpu pool 0.00)
+  exit 0, VRAM peak 22860 MiB
+--- Q-bias-code (--ctx 4096 --prefill-chunk 1024 --vram-margin 5.5 -n 1 --ppl --ids-file bench/glm-2026-10-09/prompts/eval_code.i32 --pcie auto --dense-requant q4_k --route-bias 0.02) 19:31:45 ---
+slots auto: 17.41 GiB free after the dense half -> 11.91 GiB of expert slots (margin 5.50 GiB)
+tier: gpu, 1801 resident slots, arena 48.2 GiB (7271 experts), file tier 0; load 114.8 s
+ppl: 1999 positions, mean NLL 1.31802, perplexity 3.7360
+prefill: 2000 tokens in 11.17 s = 179.10 tok/s (chunked)
+decode : 1 tokens, 1 forward passes in 0.00 s = 15114.64 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+tier ms/token: wall 0.00 (gpu hits 0.00, pcie 0.00, cpu pool 0.00)
+  exit 0, VRAM peak 22862 MiB
+=== maya-improve2 done 19:33:54 ===

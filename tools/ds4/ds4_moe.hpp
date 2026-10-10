@@ -403,6 +403,8 @@ public:
     /// and refills it from the pinned arena (the seed's order, so each slot gets back the expert it was sized for).
     /// Needs the elastic cache (slot_gib_max) and a static seed (no vram_lru).  Returns the slots given up.
     int64_t shrink_cache(std::string& err);
+    /// cudaProfilerStart/Stop (nsys --capture-range=cudaProfilerApi): the caller brackets what it wants profiled.
+    static void profiler(bool on);
     /// REAP accumulators (Ds4MoeConfig::saliency), [layer * n_experts + expert]; empty when off.
     const std::vector<double>& saliency_sum() const;
     const std::vector<int64_t>& saliency_count() const;

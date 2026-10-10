@@ -88,6 +88,9 @@ public:
     ggml_backend_t backend() const;
 
     bool begin_tokens(const int * tids, int n);
+    /// Frees the prompt chunks' shared compute buffer (re-acquired by the next chunk): its VRAM goes back to the
+    /// device after a prompt, for the elastic expert cache.
+    void release_big();
     bool begin_token(int tid) { return begin_tokens(&tid, 1); }
     /// Router hint for token 0 of the pass; false (no hint) on a dense layer.
     bool predict(int il, int * top_ids, int n_top);

@@ -37,6 +37,7 @@
 #include "strata/kernels/native_mmvq.hpp"
 
 #include <cuda_runtime.h>
+#include <cuda_profiler_api.h>
 #if defined(DS4_MOE_MMQ)
 #include "strata/prefill/moe_mmq.hpp"
 #endif
@@ -2649,6 +2650,14 @@ void Ds4MoeTier::release_chunk() {
     gp.c_pre_layer = gp.c_pre_half = -1;
     gp.c_pre_e.clear();
     gp.free_mmq();
+#endif
+}
+
+void Ds4MoeTier::profiler(bool on) {
+#if defined(DS4_MOE_CUDA)
+    if (on) cudaProfilerStart(); else cudaProfilerStop();
+#else
+    (void) on;
 #endif
 }
 

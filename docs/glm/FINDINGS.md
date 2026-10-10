@@ -707,3 +707,37 @@ Sweep: `bench/glm-2026-10-09/vram-margin.summary`.
   next thing to try (untested).
 - Maya-S-v2 wiring (4439cf5a): IQ2_S/IQ3_XXS down kernels; split-aware tier geometry (shard 1 = blk.0-23 only);
   block_count 46 - nextn_predict_layers. Armed: gate-maya.sh (s11 ppl + ablated 300K decode).
+
+## s26 (2026-10-10 evening): Maya-S-v2 + the peer-survey levers (gates 1-2: maya-improve{,2}.summary)
+Model: Maya-S-v2 (peasantsmith, IQ2_XXS g/u + IQ2_S/IQ3_XXS down, Q6_K dense; copied to the NTFS NVMe
+`/media/mal/SSD NVME/Models/GLM-5.3-Flash-Maya-S-v2/` - the SATA/FUSE MX500 read at ~255 MB/s) + OUR abliteration LoRA
+(--lora-exps), ctx 300K, prune 25% soft, skip 0.15 + renorm.  Workload: chat_code6k.i32 (12736-token chat turn with
+thinking) -> 256 greedy tokens; text read for coherence (all coherent unless noted).
+
+| arm | prefill tok/s | decode tok/s | VRAM hit | note |
+|---|---|---|---|---|
+| A today's --300k config | 204.7 | 21.69 | 23.9% | RCO on the same config: 158 / 17.8 |
+| B + LoRA delta in the MMQ chunk path | 217.8 | 22.00 | 23.8% | --chunk-mmq no longer forced off |
+| C + --census (bootstrapped from saliency) | 222.4 | 23.33 | 34.1% | pcie 12.1 -> 8.4 ms/token |
+| D + --vram-lru --vram-pin 0.6 | 222.6 | 22.32 | 44.9% | swaps pay their DMA; fewer skips (166 vs 193) = quality, not speed |
+| E D at chunk 4096, margin 9 | 380.0 | 20.47 | - | 2.5 GiB of slots left |
+| F D at chunk 6144, margin 12 | 416.5 | 17.42 | 0 slots | decode with NO VRAM cache = 17.4 |
+| G C + --pcie auto (CPU pool now ablated too) | 224.0 | 24.06 | 35.3% | cpu 3.9 / pcie 3.9 % of experts |
+| H G + --dense-requant q4_k | 229.8 | 25.87 | 42.0% | attention 17.9 -> 15.8 ms; 8.5 GiB slots |
+| K H + elastic, chunk 4096 (margin 7.5, grow 1.5) | 399.6 | 24.49 | 41.4% | grow 909 -> 1412 slots in 136 ms |
+| L H + elastic, chunk 6144 (margin 10) | 439.9 | 23.12 | 37.9% | grow 474 -> 1231 |
+| I K + --route-bias 0.02 | 397.6 | 23.09 | 30.8% | LOSS (hit fell) - dropped |
+| J K at ctx 524288 | 392.5 | 23.94 | 37.3% | 512K costs ~0.6 tok/s |
+
+Chunked ppl (2000 tokens, margin 5.5): Maya+LoRA chat **5.337** / code **3.720** (RCO unablated 5.547 / 3.668);
+q4_k dense 5.612 (+5.2%) / 3.708; q4_k + route bias 5.672 / 3.736.  -> q4_k dense costs chat quality (double
+requant, no imatrix) - gate 3 tries q5_k.
+- MTP: NOT ported. project-maya (the Maya author's engine) refuses MTP on one GPU ("carries its weights and expert
+  slots for nothing until a batched verify exists" - glm_model.cu:2398); helios measured -26..-57% wall; PolyStrata
+  on our box +2%.  A verify row routes to a different expert set, so with ~35-45% residency it cannot pay.
+- Decode anatomy (H): attention+router 15.8 ms, experts 18.9 ms (hits 6.3, pcie 4.5, cpu 6.3 - overlapped), prefetch
+  2.1, finish 1.2, head 0.5.  The tier wall (18.9) exceeds max(card, pool) by ~8 ms: per-layer host round trips.
+- Two leaks found in the elastic arms (fixed for gate 3): (1) attn_router_n uploaded the WHOLE input span every
+  decode token - the mask alone is MCAP x NT F16 = 16-24 MB at NT 4096-6144 (K: attention 15.8 -> 18.4 ms); now each
+  input's used prefix only. (2) the dense chunk compute buffer (allo_big) was kept after the prompt -> GlmDense::
+  release_big() frees it before grow_cache.

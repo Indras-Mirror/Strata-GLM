@@ -592,6 +592,7 @@ int main(int argc, char ** argv) {
                 progress(c0 + m);
             }
             tier.release_chunk();
+            if (elastic_req) dense.release_big();   // the chunk compute buffer too, before the cache grows into it
             if (elastic_req) {
                 std::string gerr;
                 if (tier.grow_cache(a.vram_grow_keep, gerr) < 0) { ferr = "grow_cache: " + gerr; return false; }
@@ -807,6 +808,7 @@ int main(int argc, char ** argv) {
         }
         tier.release_chunk();
     }
+    if (slot_gib_max > 0) dense.release_big();   // the chunk compute buffer's VRAM too
     if (slot_gib_max > 0) {   // elastic cache: the prompt's VRAM is back - give it to the expert cache for decode
         std::string gerr;
         if (tier.grow_cache(a.vram_grow_keep, gerr) < 0) { std::fprintf(stderr, "glm_generate: %s\n", gerr.c_str()); return 1; }
@@ -838,6 +840,8 @@ int main(int argc, char ** argv) {
     int pos = (int) prompt.size(), n_gen = 0;
     const double t_dec0 = now_ms();
     timing = true;
+    static const bool prof_dec = std::getenv("GLM_PROFILE_DECODE") != nullptr;   // nsys --capture-range=cudaProfilerApi
+    if (prof_dec) ds4::Ds4MoeTier::profiler(true);
     for (; n_gen < a.n_predict; ++n_gen) {
         const double th0 = now_ms();
         const float * lg = nullptr;
@@ -860,6 +864,7 @@ int main(int argc, char ** argv) {
             return 1;
         }
     }
+    if (prof_dec) ds4::Ds4MoeTier::profiler(false);
     if (rfile) { flush_routes(true); std::fclose(rfile); }
     const double dec_ms = now_ms() - t_dec0;
     const ds4::Ds4MoeStats st = tier.stats();
