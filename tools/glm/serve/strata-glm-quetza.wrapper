@@ -13,9 +13,9 @@
 # Multi-turn: the engine snapshots the state at the end of every prompt; a follow-up that extends it reads only the
 #          new tokens.
 # Usage:   strata-glm-quetza [--stock] [--fast] [--full] [--300k|--max] [--maya] [--maya512] [--port=N] [-- <quetza args>]
-#          --maya: GLM-5.3-Flash Maya-S-v2 (peasantsmith, FP8-derived i-quants, on the NTFS NVMe) + our abliteration LoRA,
-#          300K context, every s26 improvement (census, vram-lru pin, CPU+PCIe balance, MMQ prefill), port 8143
-#          --maya512: the same at a 512K context, port 8144
+#          --maya (= --maya512): GLM-5.3-Flash Maya-S-v2 (FP8-derived i-quants, NTFS NVMe) + our abliteration LoRA,
+#          512K context, the s26 stack (census, elastic VRAM cache + 6K-chunk MMQ prefill, q5_k dense, CPU+PCIe
+#          balance): measured ~390-430 tok/s prefill, ~25 tok/s decode.  port 8144.  --maya300: 300K, port 8143
 #          --300k / --max: the --full ablation at a REAL 300K context (ctx 307200; the MLA cache is no longer rounded
 #          up to 512K) -> ~2.2 GiB more VRAM expert slots than --full, port 8142 (FINDINGS s25d)
 #          --fast: --skip-miss 0.15 -> decode ~20.6 tok/s (vs ~9.7), a quality cost (see FINDINGS)
@@ -49,8 +49,8 @@ for arg in "$@"; do
         --fast)              FAST=1; UNCENSORED=1 ;;   # --skip-miss 0.15: 2x decode, a quality cost
         --full|--ablated-full) FULL=1; UNCENSORED=1 ;;   # full routed-expert ablation + skip 0.15 + --renorm-skip
         --300k|--max)        MAX=1; UNCENSORED=1 ;;     # --full at a real 300K context: more VRAM expert slots
-        --maya)              MAYA=300; UNCENSORED=1 ;;  # Maya-S-v2 + LoRA, 300K, the s26 stack
-        --maya512)           MAYA=512; UNCENSORED=1 ;;  # the same at 512K
+        --maya|--maya512)    MAYA=512; UNCENSORED=1 ;;  # Maya-S-v2 + LoRA, 512K (costs ~nothing vs 300K), the s26 stack
+        --maya300)           MAYA=300; UNCENSORED=1 ;;  # the same at 300K
         *)                   QUETZA_ARGS+=("$arg") ;;
     esac
 done
