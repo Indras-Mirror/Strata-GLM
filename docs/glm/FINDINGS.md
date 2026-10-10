@@ -747,12 +747,22 @@ Source: `bench/glm-2026-10-09/mi3-decode_{cuda_api,cuda_gpu_kern,cuda_gpu_mem_ti
 decode loop (old binary, 27.70 s / 255 forward passes / 256 tokens, 9.21 tok/s) - `GLM_PROFILE_DECODE=1`, capture range
 cudaProfilerApi.  **The gate-4 P-nsys arm re-profiles on the current binary; re-read the three CSVs before acting.**
 
-**The GPU is idle ~98% of the token.** Totals from that capture: GPU kernels **584.5 ms** (2.1% of 27.7 s); H2D copy
-engine 6195 ms (22%, 24.3 ms/token ~ 575 MB/token, 126838 ops); CUDA API 9743 ms, of which **cudaStreamSynchronize
-6825 ms (70.1%) over 90826 calls = 356/token** (median 7.2 us, max 4.6 ms).  78356 kernel launches = 307/forward
-pass; 14801 `native_gu_multi_kernel` + 11972 `native_down_multi` + 9250 `lora_down` = 45 layers x ~ (58,47,36)/pass,
-i.e. the kernels ARE the MoE groups.  So the earlier "the copy engine is busy nearly every millisecond" reading (s26)
-is true but not causal: 2.3 ms/token of GPU work and 24 ms/token of async H2D sit inside a 108 ms token.
+**ERRATA (added 20:10, same session - two of this section's first claims were WRONG; corrected below.  Keep the sync
+count and the de-sync roadmap; DISCARD the "GPU idle" and "--pcie auto units" claims.)**
+
+**The GPU utilisation is NOT measured by this capture - do not claim "GPU idle ~98%".** The kernel table (584.5 ms,
+78356 instances) contains **only direct `cudaLaunchKernel` launches**: 78356 table instances vs 83099 API calls, and
+the breakdown is native/MoE 480.6 ms (40312), lora 58.9 (9250), aux quantize/swiglu 29.0 (24642), ggml/dense
+**11.5 ms / 1354 instances**.  255 passes x 45 layers of attention cannot be 1354 kernels, and `flash_attn_ext_f16`
+shows **11 instances total** - i.e. the attention/finish/predict compute runs **inside the 34036 `cudaGraphLaunch`
+calls (134 graphs x 255 passes) and its nodes were NOT expanded into this table**.  The 11.5 ms of dense kernels are
+capture-warmup stragglers, not the attention cost.  To measure real occupancy, re-capture with the graph nodes
+expanded (`--cuda-graph-trace=node`) or sum the per-graph times.  Also note the capture is the OLD binary at 9.21
+tok/s (108 ms/token vs 41 ms now), which inflates any idle share.
+
+**What IS solid** (wall measurements, independent of the kernel table): the H2D copy engine 6195 ms = 24.3 ms/token,
+~575 MB/token, 126838 ops (async, so overlapped); CUDA API 9743 ms of which **cudaStreamSynchronize 6825 ms = 70.1%
+over 90826 calls = 356/token** (median 7.2 us, max 4.6 ms).  The sync total, not the copy volume, is the finding.
 
 **The 356 syncs/token are fully accounted for: 8 per layer x 45 layers = 360.**  Per decode layer per token, the
 engine makes FOUR host round trips, each of which is a synchronous ggml call:
@@ -768,6 +778,9 @@ back TWICE (the ffn_norm activation, and the routed sum), and the host blocks 8 
 
 **Consequence - the expert-time decomposition is serial, not overlapped.** The tier wall for a layer (~20.6 ms/token)
 equals gpu hits (6.19) + pcie (3.86) + cpu pool (9.12) - it is a SUM, so the CPU pool does not overlap the GPU.
+(`hit_ms`/`pcie_ms` are `cudaEventElapsedTime` between events on gp.s, so they are wall elapsed and include the
+stream's own stalls; `cpu_ms` is host wall.  That is what makes the sum meaningful - and it is why the missing
+graph-node time does not affect this paragraph.)
 Per-expert cost: **CPU pool 0.52 ms vs GPU hit 0.045 ms (11.6x)**; misses are ~28/token of 360 lookups (17.6 cpu +
 10.4 pcie); the other 181/token are already dropped by skip/rename.  Moving pool work to the card cannot fix this by
 itself - PCIe costs 0.37 ms/expert and is just as serial.
@@ -783,8 +796,10 @@ itself - PCIe costs 0.37 ms/expert and is just as serial.
   nothing finish(il-1) does not already have) - saves a launch + readback sync per layer.
 - (d) Once (a)-(c) land, layer l+1's attn graph can be issued while the host still decides layer l's experts, i.e.
   a rolling pipeline - the only way to overlap the 9 ms/token pool.
-- (e) Only then re-measure the CPU/PCIe split: with the pool overlapped, `--pcie auto`'s EMA (`ema_hit` is the hit
-  group's ms, used as if per-expert - inconsistent units, ds4_moe.cpp:1347-1350) should be re-derived.
+- (e) Only then re-measure the CPU/PCIe split.  (An earlier draft of this section called `--pcie auto`'s EMA units
+  inconsistent - that was WRONG.  `ema_cpu`/`ema_pcie` are per-expert, `ema_hit` is the hit group's TOTAL ms, and
+  `nc*c - ema_hit` is ms - ms, with `/(p+c)` ms per expert, so `budget` is a count.  It is the correct
+  hit_time + np*p = (nc-np)*c balance.  Leave the formula alone.)
 
 Cheap, no-numerics-change candidate first: (c), then (b).  Both are checkable by ppl parity (X-* arms) + the nsys
 sync count, NOT by wall time alone.

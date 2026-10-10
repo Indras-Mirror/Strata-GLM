@@ -21,12 +21,15 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
 **PUSHED to Indras-Mirror/Strata-GLM main** (2026-10-10 late, `a864dfad`; earlier local-only notes below are stale).
 Read FINDINGS s25d + s26 + **s27** first.
 
-**DECODE IS HOST-LATENCY-BOUND (FINDINGS s27) - read it before touching decode speed.** nsys: the GPU is busy 2.1% of
-the token (584 ms of kernels in 27.7 s); 70% of all CUDA API time is `cudaStreamSynchronize`, **356 calls/token =
-8 per layer x 45 layers** (predict, attn, the `o_span` readback, the two `gpu_run` syncs, the `routed_sum` upload,
-the finish graph - each a synchronous ggml call).  The per-layer expert wall is the SUM of card+pcie+pool, so the
-9.1 ms/token CPU pool does not overlap anything.  The fix is de-synchronisation (GPU-side MoE sum, keep the residual
-on-device, fold `predict` into the previous finish graph), NOT the copy engine and NOT tier tuning.
+**DECODE IS HOST-LATENCY-BOUND (FINDINGS s27, incl. its ERRATA) - read both before touching decode speed.**
+nsys: 70% of all CUDA API time is `cudaStreamSynchronize`, **356 calls/token = 8 per layer x 45 layers** (predict,
+attn, the `o_span` readback, the two `gpu_run` syncs, the `routed_sum` upload, the finish graph - each a synchronous
+ggml call).  The per-layer expert wall is the SUM of card+pcie+pool, so the 9.1 ms/token CPU pool does not overlap
+anything.  The fix is de-synchronisation (GPU-side MoE sum, keep the residual on-device, fold `predict` into the
+previous finish graph), NOT the copy engine and NOT tier tuning.  **Do NOT repeat the retracted claim that the GPU is
+~2% busy**: that kernel table holds only direct launches (the MoE tier) - the attention/finish/predict work runs
+inside 34036 `cudaGraphLaunch` calls whose nodes were not expanded, so real occupancy is UNMEASURED.  Re-capture with
+`--cuda-graph-trace=node` first.  Prefetch stays (`--pf-b 0` is a net loss, gate 4).
 
 **MODEL:** Maya-S-v2 (peasantsmith, FP8-derived i-quants, 3 shards + NextN blk.45) at
 `/media/mal/SSD NVME/Models/GLM-5.3-Flash-Maya-S-v2/` (NTFS NVMe, verified copy; the SATA original on
