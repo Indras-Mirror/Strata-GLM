@@ -20,12 +20,12 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
 ## State (2026-10-10 NIGHT-2, s28) - **CURRENT** (supersedes LATE below; read FINDINGS s28 first)
 Committed on `glm` (local; push with `git push glm glm:main` when Mal says).
 **Shipped serve config** (tools/glm/serve/strata-glm-maya-abl-512k.json; the wrapper default): Maya-S-v2 + LoRA,
-512K, chunk 4096, margin 7.5, vram-grow 1.5, **--pf-b 1.0, --dense-requant q4_k, --arena-gib 64** (+ the s26 flags).
-Measured decode **27.2 tok/s** (session start 23.7), prefill ~400; exact ppl chat 5.35 / code 3.65 (the old q5_k
+512K, chunk 4096, margin 7.5, vram-grow 1.5, **--pf-b 1.0, --arena-gib 64, native q6_k dense (no --dense-requant: Mal's call - quality over +2 tok/s)**.
+Measured decode **25.0 tok/s** (q4_k would be 27.2), prefill ~400; exact ppl chat 5.27 / code 3.60 (the old q5_k
 default was 5.60 / 3.64).  Long prompts fixed (the 19K-token OOM; 100K verified) - see FINDINGS s28 item 1.
 **Decode is PCIe-bound**, not host-latency-bound (s27 corrected): H2D 26 ms/token at ~22 GB/s; kernels 16 ms.
-**Settled:** arena 72 GiB with q4 is only +1.5% (27.64) at ~5 GiB free -> 64 stays.  **Open for Mal:** q4_k vs native q6
-(+1.5% ppl for +8.8% speed).  **Next levers:** see FINDINGS s28 "Remaining levers"; the q5_k chat anomaly bisect.
+**Settled:** arena 72 GiB with q4 is only +1.5% (27.64) at ~5 GiB free -> 64 stays.  **Decided (Mal):** native q6, not q4_k
+(+1.5% ppl for +8.8% speed is not worth it).  **Next levers:** see FINDINGS s28 "Remaining levers"; the q5_k chat anomaly bisect.
 ggml patch: third_party/llama.cpp is untracked - apply tools/glm/patches/*.patch to a fresh copy (GNU /usr/bin/patch;
 anaconda's `patch` binary is corrupt).
 

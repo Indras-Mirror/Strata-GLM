@@ -901,3 +901,4 @@ bisect would find it.  Shipped: q4_k (faster than q5 AND better chat).  `--dense
 **Remaining levers (each small):** arena 72 GiB if RAM allows (+~6%); router/hc F32 -> F16 (<= 0.6 ms, changes top-k
 numerics); elementwise fusion (~5 ms/token of tiny kernels, ggml-level); CPU pool ~0.36 ms/expert vs ~0.2 floor (lets
 --pcie auto move misses off the saturated bus); prefetch further ahead (the bus idles ~14 ms/token).
+- **Mal's call (2026-10-10): serve native q6_k dense** - quality over q4_k's +2 tok/s.  Shipped decode 25.0 tok/s.
