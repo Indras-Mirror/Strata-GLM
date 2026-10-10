@@ -658,3 +658,23 @@ published an uncensored GSQ-RCO GLM at 2-3 bit.**
   or use orcarouter FP8-uncensored (~320 GB, slightly lossy), or GSQ on top of an existing GGUF (the paper supports
   it). Disk is the blocker (49 GB free on NVMe1TB; SSD NVME 163 GB is the roomiest).
 - **Recommendation: don't re-quantize.** The runtime LoRA + `--renorm-skip` is the cheaper path to ablated+fast.
+
+## s25 (2026-10-10 PM): the abliterated decode A/B - `--renorm-skip` is a 3x ON THE ABLATED PATH
+`--lora-exps` forces `--pcie 1.0` and (before `--renorm-skip`) skip 0, so the ablated server computed every miss
+over PCIe. Clean A/B (eval_code prompt, 128-token generate, arena 69.2 GiB, file tier 0, ~8335 experts both arms):
+| ablated arm | load | decode |
+| --- | ---: | ---: |
+| skip 0 (pcie 1.0 forced) | 468 s | **5.44 t/s** |
+| skip 0.15 + `--renorm-skip` | 149 s | **16.27 t/s** |
+So enabling skip-miss in the ablated path is **3x** (5.44 -> 16.27): the ablated server now roughly matches the
+non-ablated fast server, WITH the full routed-expert ablation. This is `strata-glm-quetza --full` /
+`strata-glm-unc-ablated.json`. (Loads differ 468 vs 149 s = page-cache warmth; residency was identical.)
+
+## s25b: `--arena-lazy` (fast start), and what the load actually costs
+The 69 GiB arena fill blocks the first token 250-800 s while the drive measures **2.5 GB/s** (dd, O_DIRECT and
+buffered) - the fill, not the disk, is the cost. `--arena-lazy` (default OFF) allocates the arena, unfills every
+slot (so misses go to the file tier), and publishes slots blob-by-blob from a background thread once their bytes
+land, so the engine answers in ~seconds and slots become hits as they fill. Compiles (679 MB / 3117-cubin build);
+**not yet GPU-tested**. Also: our `--vram-margin 5.5` (code default 1.0) and the 512K KV (~6 GiB) keep expert
+slots at 731/5.63 GiB vs PolyStrata's 1413/10.9 GiB on the same card - the ctx/margin sweep (32K/300K @ 1.5) runs
+after this.
