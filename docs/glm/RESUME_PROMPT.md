@@ -17,6 +17,47 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
 `docs/glm/FINDINGS.md`; then the DS4 docs we build on: `docs/ds4/RESUME_PROMPT.md` (rules, gates, lessons),
 `docs/ds4/ENGINE_DENSE.md`, `docs/ds4/ENGINE_MOE.md`; `git log --oneline -15`.
 
+## State (2026-10-10 LATE) - **CURRENT: Maya-S-v2 is the model; s26 stack built; gate 4 (final) may be running** (supersedes NIGHT)
+**Everything committed on `glm`, NOT pushed** (latest `dd152eca`). Read FINDINGS s25d + s26 first.
+
+**MODEL:** Maya-S-v2 (peasantsmith, FP8-derived i-quants, 3 shards + NextN blk.45) at
+`/media/mal/SSD NVME/Models/GLM-5.3-Flash-Maya-S-v2/` (NTFS NVMe, verified copy; the SATA original on
+/media/Crucial1TB is slow FUSE - can be deleted). Wired: IQ2_S/IQ3_XXS down kernels, split-aware tier geometry,
+block_count - nextn_predict_layers. Our gcsa LoRA works on it (coherent).
+
+**MEASURED (Maya+LoRA, 300K, 12.7K-token chat prompt -> 256 tok, all coherent):**
+- base (RCO's --300k flags): prefill 205 / decode 21.7 tok/s (RCO: 158 / 17.8)
+- best so far (elastic + chunk 6144 + q5_k dense + census + pcie auto): **prefill 433 / decode 24.9**; 512K: 389 / 24.8
+- ppl Maya+LoRA chat 5.34 / code 3.72 (RCO unablated 5.55 / 3.67). Requant ppl with skips ON is noise-confounded
+  (q4 chat 5.61, q5 5.73 but q5 code 3.66) -> gate 4 measures it with exact math (X-* arms).
+
+**NEW FLAGS (s26):** `--census FILE` (live per-expert counts; bootstrap tools/glm/census_from_saliency.py ->
+~/.quetza-data/strata-glm/maya-s-v2.census), `--pcie auto`, `--dense-requant q4_k|q5_k`, `--vram-pin F` (with
+--vram-lru; quality option, -4% speed), `--vram-grow K` now works in --serve (per-request shrink before prompts >256
+tok, grow after; grown at startup), chunk cap 8192, MMQ + CPU pool apply the LoRA delta (no forced pcie 1.0 / mmq off),
+`GLM_PROFILE_DECODE=1` (nsys --capture-range=cudaProfilerApi). Fixed: per-token full input-span upload, chunk compute
+buffer kept after prompt (GlmDense::release_big), indexer pools sized by chunk in decode (NW).
+
+**DROPPED (measured/evidence):** MTP on one GPU (project-maya disables it; helios -26..-57%; PolyStrata +2%),
+--route-bias (hit fell, ppl up), vram-lru as default.
+
+**NEXT (in order):**
+1. Read `bench/glm-2026-10-09/maya-final.summary` (gate-maya-final.sh: R300/R512 x 4k/6k, R300-4k-nopf = --pf-b 0,
+   X-q6/q5/q4 exact ppl, nsys). If it did not run: `bash bench/glm-2026-10-09/gate-maya-final.sh` (build first:
+   `cmake --build build-glm-gpu --target glm_generate`; the last 3 commits were not in a GPU run yet).
+2. Pick flags: q5_k vs none (by X-* ppl), chunk 4096 vs 6144, pf-b. Edit tools/glm/serve/strata-glm-maya-abl-{300k,512k}.json.
+3. Install wrapper: `cp tools/glm/serve/strata-glm-quetza.wrapper ~/.local/bin/strata-glm-quetza` (adds --maya
+   port 8143, --maya512 port 8144). Smoke-test via Quetza.
+4. **Decode bottleneck (nsys mi3-decode*.csv):** copy engine ~24 ms/token, 575 MB/token H2D - mostly the expert
+   PREFETCH (60 issued/token, ~45 used). Try --pf-b lower/0; then cut per-layer host syncs (355
+   cudaStreamSynchronize/token, 75 us avg) - keep VRAM-hit layers on the GPU, host only for CPU-pool misses.
+5. Harness bench: ~/AI/quetza-workspace/model-gauntlet/harness-bench (run_bench.py --model glm-maya added; start the
+   server with the wrapper's config on port 8143 first).
+6. When done with the GPU: relay to peer `strata-ds4-gpu` (mcp quetza-relay relay_ask) that the GPU is free for its
+   V4.1 calibration.
+GPU is shared via ~/.quetza-data/conductor/ds4-gpu.lock (tools/ds4/memguard.sh). Mal wants: 30 tok/s ablated at 512K,
+high prefill, then coding/agentic/coherency benchmarks.
+
 ## State (2026-10-10 NIGHT) - **CURRENT: ablated server 3x; the residency lever found (margin must leave scratch room); spec block fetched but does NOT pay** (supersedes the PM block below)
 **Everything committed on `glm`, NOT pushed** (12 commits; latest `9e423502`).
 
