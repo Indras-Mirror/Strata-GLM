@@ -12,7 +12,9 @@
 # Context: 524288 (512K; MLA latent cache ~6 GB VRAM, fewer expert slots -> decode ~7-9 tok/s)
 # Multi-turn: the engine snapshots the state at the end of every prompt; a follow-up that extends it reads only the
 #          new tokens.
-# Usage:   strata-glm-quetza [--stock] [--fast] [--full] [--port=N] [-- <quetza args>]
+# Usage:   strata-glm-quetza [--stock] [--fast] [--full] [--300k|--max] [--port=N] [-- <quetza args>]
+#          --300k / --max: the --full ablation at a REAL 300K context (ctx 307200; the MLA cache is no longer rounded
+#          up to 512K) -> ~2.2 GiB more VRAM expert slots than --full, port 8142 (FINDINGS s25d)
 #          --fast: --skip-miss 0.15 -> decode ~20.6 tok/s (vs ~9.7), a quality cost (see FINDINGS)
 # ============================================================================
 set -eE
@@ -24,11 +26,13 @@ CONFIG_UNC="$GLM_DIR/tools/glm/serve/strata-glm-unc.json"
 CONFIG_FAST="$GLM_DIR/tools/glm/serve/strata-glm-unc-fast.json"
 CONFIG_STOCK="$GLM_DIR/tools/glm/serve/strata-glm.json"
 CONFIG_ABLATED="$GLM_DIR/tools/glm/serve/strata-glm-unc-ablated.json"   # full routed-expert abliteration + skip 0.15 + --renorm-skip
+CONFIG_MAX="$GLM_DIR/tools/glm/serve/strata-glm-unc-ablated-300k.json"   # the same at a real 300K context (more expert slots)
 CONTEXT_SIZE=524288
 LOCAL_HOST="127.0.0.1"
 UNCENSORED=1
 FAST=0
 FULL=0
+MAX=0
 PORT_SET=0
 QUETZA_ARGS=()
 for arg in "$@"; do
@@ -38,10 +42,14 @@ for arg in "$@"; do
         --uncensored|--unc)  UNCENSORED=1 ;;
         --fast)              FAST=1; UNCENSORED=1 ;;   # --skip-miss 0.15: 2x decode, a quality cost
         --full|--ablated-full) FULL=1; UNCENSORED=1 ;;   # full routed-expert ablation + skip 0.15 + --renorm-skip
+        --300k|--max)        MAX=1; UNCENSORED=1 ;;     # --full at a real 300K context: more VRAM expert slots
         *)                   QUETZA_ARGS+=("$arg") ;;
     esac
 done
-if [ "$FULL" = 1 ]; then
+if [ "$MAX" = 1 ]; then
+    CONFIG="$CONFIG_MAX"; [ "$PORT_SET" = 0 ] && LOCAL_PORT=8142; MODEL_NAME="glm-5.3-flash-strata-ablated-300k"
+    CONTEXT_SIZE=307200
+elif [ "$FULL" = 1 ]; then
     CONFIG="$CONFIG_ABLATED"; [ "$PORT_SET" = 0 ] && LOCAL_PORT=8140; MODEL_NAME="glm-5.3-flash-strata-ablated-full"
 elif [ "$FAST" = 1 ]; then
     CONFIG="$CONFIG_FAST"; [ "$PORT_SET" = 0 ] && LOCAL_PORT=8140; MODEL_NAME="glm-5.3-flash-strata-abliterated-fast"

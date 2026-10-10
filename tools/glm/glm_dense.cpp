@@ -100,13 +100,16 @@ std::string read_geometry(const GgufFile & f, GlmGeometry & g) {
         if (k.i) *k.i = (int64_t) tmp;
         else *k.d = tmp;
     }
+    // block_count includes the NextN draft block when the file ships it (Maya-S-v2: 46 = 45 decoder layers + blk.45);
+    // the per-layer arrays below then have block_count entries, of which the first n_layer are the decoder's
+    if (meta_num(f, p + "nextn_predict_layers", tmp) && tmp > 0 && (int64_t) tmp < g.n_layer) g.n_layer -= (int64_t) tmp;
     if (const MetaValue * v = meta(f, p + "expert_weights_norm")) g.expert_weights_norm = v->u != 0;
     if (const MetaValue * gf = meta(f, p + "expert_gating_func"); gf && gf->num() != 2)
         return "expert_gating_func " + std::to_string((int) gf->num()) + " (only sigmoid = 2 is implemented)";
     if (const MetaValue * r = meta(f, p + "rope.dimension_count"); r && r->num() != 0)
         return "rope.dimension_count != 0: GLM5-Next MLA is nope-only";
     std::vector<double> kv;
-    if (!meta_arr(f, p + "attention.head_count_kv", kv) || (int64_t) kv.size() != g.n_layer)
+    if (!meta_arr(f, p + "attention.head_count_kv", kv) || (int64_t) kv.size() < g.n_layer)
         return "attention.head_count_kv must be a per-layer array (0 = KDA layer)";
     g.is_kda.assign((size_t) g.n_layer, false);
     for (int64_t l = 0; l < g.n_layer; ++l) g.is_kda[(size_t) l] = kv[(size_t) l] == 0;
@@ -780,7 +783,10 @@ bool GlmDense::init(const std::string & model_path, const GlmDenseConfig & cfg, 
     im.DC = g.d_conv; im.KVL = g.kv_lora; im.KM = g.k_mla; im.VM = g.v_mla;
     im.NEXP = g.n_expert; im.NUSED = g.n_expert_used;
     im.NT = std::max(1, cfg.max_tokens);
-    im.CAPMAX = std::max<int64_t>(im.cpu ? 16 : 256, next_pow2(std::max<int64_t>(1, cfg.ctx)));
+    // the MLA cache holds ctx rounded up to 256 (was: to a power of two - --ctx 307200 then allocated 512K, ~2.2 GiB of
+    // VRAM the expert slots never got).  The per-step buckets (cap_for) stay powers of two below it; only the last
+    // bucket is CAPMAX itself.  256 keeps PCAP = CAPMAX / KP whole and the KV length a multiple of FA's 256 stride.
+    im.CAPMAX = std::max<int64_t>(im.cpu ? 16 : 256, (std::max<int64_t>(1, cfg.ctx) + 255) / 256 * 256);
     im.KP = g.idx_kpool; im.IDXD = g.idx_dim; im.IDXH = g.idx_heads;
     im.PCAP = im.CAPMAX / im.KP;
     im.NNEW = std::max<int64_t>(1, cfg.max_tokens) / im.KP + 1;
