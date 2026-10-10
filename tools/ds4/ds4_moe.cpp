@@ -409,7 +409,10 @@ bool ds4_moe_layer_layout(const Ds4MoeGeom& g, int64_t l, cpu::NativeFmt& f, std
 
 bool ds4_moe_geom_from_gguf(const std::string& gguf, Ds4MoeGeom& g, std::string& err) {
     try {
-        GgufFile f(gguf);
+        // every shard (a split GGUF - GLM-5.3-Flash Maya-S-v2 is 3 - keeps blk.24+ out of the first file): metadata from
+        // shard 1, tensors looked up across all of them.  A lone GgufFile here silently saw layers 24-44 as expert-less.
+        const GgufModel model = GgufModel::open(gguf);
+        const GgufFile& f = model.meta();
         // the architecture's own key prefix: deepseek4.*, mimo2.*, ... (the key names are llama.cpp's, shared)
         std::string arch = "deepseek4";
         if (const MetaValue* a = f.get("general.architecture"); a && a->type == MetaType::STRING) arch = a->s;
@@ -428,6 +431,10 @@ bool ds4_moe_geom_from_gguf(const std::string& gguf, Ds4MoeGeom& g, std::string&
             }
             *k.second = v;
         }
+        // block_count counts the NextN/MTP draft block(s) when the file carries them (Maya-S-v2: 46 = 45 + blk.45);
+        // they are not decoder layers and their experts must not enter the tier
+        if (int64_t nn = 0; meta_i64(f, arch + ".nextn_predict_layers", nn) && nn > 0 && nn < g.n_layers)
+            g.n_layers -= nn;
         // every layer's three expert types; a layer with none of the tensors has no routed experts (MiMo's layer 0)
         const char* roles[3] = {"gate", "up", "down"};
         std::vector<int> ty[3];
@@ -437,7 +444,7 @@ bool ds4_moe_geom_from_gguf(const std::string& gguf, Ds4MoeGeom& g, std::string&
             for (int r = 0; r < 3; ++r) {
                 char name[64];
                 std::snprintf(name, sizeof name, "blk.%lld.ffn_%s_exps.weight", (long long) l, roles[r]);
-                const TensorInfo* ti = f.find(name);
+                const TensorInfo* ti = model.find(name);
                 if (!ti) continue;
                 ++have;
                 // ne0 is the input width: gate/up are [n_embd, n_ff, n_experts], down is [n_ff, n_embd, n_experts].

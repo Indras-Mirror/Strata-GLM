@@ -733,7 +733,7 @@ template<> struct Fmt<8> { static constexpr int qk = 32, ipb = QI8_0 / VDR_Q8_0,
 // Fork formats, kept out of upstream's lists above so those stay verbatim (fewer merge conflicts): Q2_K (10,
 // DeepSeek-V4 down), Q3_K (11, MiMo GSQ-RCO), MXFP4 (39, MiMo outliers).  Each use site expands the _FORK list too.
 #define STRATA_GU_FMTS_FORK(X) X(10) X(11)
-#define STRATA_D_FMTS_FORK(X) X(10) X(11) X(12) X(39)   // 12 = Q4_K down_exps (GLM-5.3-Flash layers 3-5; upstream's list has none)
+#define STRATA_D_FMTS_FORK(X) X(10) X(11) X(12) X(39) X(18) X(22)   // 12 = Q4_K down_exps (GLM-5.3-Flash layers 3-5; upstream's list has none); 18/22 = IQ3_XXS / IQ2_S down_exps (GLM-5.3-Flash Maya-S-v2)
 #define STRATA_MMVQ_FMTS_FORK(X) X(10)
 
 __device__ __forceinline__ float warp_sum(float v) {
