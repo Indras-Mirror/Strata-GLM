@@ -549,7 +549,11 @@ static ggml_cgraph * build_attn(GlmDense::Impl & im, int il, int64_t cap, int64_
         ggml_tensor * kview = ggml_view_3d(gc, kvc2, im.KVL, cap, 1, kvc2->nb[1], kvc2->nb[1] * cap, 0);
         // ---- lightning indexer (glm5-next.cpp build_kpool_select).  The pooled-key cache is kept up to date on
         // every pass, the selection only runs past idx_top_k positions.
-        const int64_t KP = im.KP, ID = im.IDXD, NW = im.NNEW;
+        // NW: the pools a pass of n tokens can complete (<= n/KP + 1), not NNEW (sized by the largest chunk): decode used
+        // to gather / pool / scatter max_tokens/KP + 1 pools (1025 at chunk 4096) per MLA layer per token, all but one
+        // of them padding into the dump row (s26: attention +2.3 ms/token at chunk 4096).  The host fills the real
+        // entries first, so the first NW are all of them.
+        const int64_t KP = im.KP, ID = im.IDXD, NW = std::min<int64_t>(im.NNEW, n / im.KP + 1);
         ggml_tensor * ik = ggml_norm(gc, ggml_mul_mat(gc, b.BL(il, "indexer.attn_k.weight"), xn), (float) im.g.ln_eps);
         ik = ggml_add(gc, ggml_mul(gc, ik, b.BL(il, "indexer.k_norm.weight")), b.BL(il, "indexer.k_norm.bias"));
         ggml_tensor * ig = ggml_mul_mat(gc, b.BL(il, "indexer_compressor_gate.weight"), xn);
