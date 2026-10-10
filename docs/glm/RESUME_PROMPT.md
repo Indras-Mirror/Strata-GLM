@@ -42,8 +42,12 @@ content, **0** "LPVOID" repeats; `finish=length` only because it hit the 900-tok
    prefill/decode skip rules, (b) teach the MMQ chunk path the deltas (`ds4_moe.cpp:2145-2180` builds no `plo`).
 2. **COMMITTED, not pushed** (`1b05fa5e` code + `431a2e4f` docs): the X(12) fix, `--renorm-skip`, `lora_bake.cpp`, the
    findings/resume docs, and the ablated-turned-fast serve config.
-3. Abliterated-model research is in FINDINGS s24 (don't re-quantize; huihui skips the experts so it's the wrong source;
-   ternary expert floor ~66 GB if we ever do). Note a ppl pass is now ~7 min (arena load 236-411 s on this box).
+3. Community peers surveyed in **`docs/glm/PEERS.md`** - `project-maya` (same model + upstream, MIT) matters most: a
+   **from-FP8 quant toolchain** (GPTQ error-feedback, per-expert FP8 stats; 97.9% of FP8 zero-shot at ~90-96 GB), MTP
+   that pays **only head/tail-pipelined on 2 GPUs** (reconciles our s21 single-GPU rejection), an SSD tier, and a
+   reusable eval harness (`kl_eval`/`zs_*`/`loop_test`/`ctx_fill`). Also `bodhi37/strata` (NVMe read-amp fix, O_DIRECT,
+   pressure governor) and maya's finding that **cache policy is not the lever (LRU=LFU~Belady)**. Abliterated-model
+   research is in FINDINGS s24. Note a ppl pass is now ~7 min (arena load 236-411 s on this box).
 
 ## State (2026-10-10) - **UPSTREAM MERGED** (superseded by the block above)
 **glm is now a real descendant of upstream Strata.** `glm` == `87cd462f`, a MERGE whose second parent is
