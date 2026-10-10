@@ -261,7 +261,12 @@ struct GlmDense::Impl {
     ggml_context * sctx = nullptr;   // persistent state (sbuf)
     ggml_backend_buffer_t sbuf = nullptr;
     ggml_context * ictx = nullptr;   // input span + router output blocks
-    ggml_backend_buffer_t ibuf = nullptr, obuf = nullptr;
+    ggml_backend_buffer_t ibuf = nullptr, obuf = nullptr, pbuf = nullptr;
+    // s28 fused predict: finish(il) on one token also runs predict(il+1) into pred_sel (its own graph launch and sync
+    // gone); pred_ready = the layer whose selection scores pred_sel holds now (-1: none - predict() falls back)
+    ggml_tensor * pred_sel = nullptr;
+    int pred_ready = -1;
+    bool fused_pred = true;
     ggml_context * gctx = nullptr;   // graph node structs
 
     // pass state
@@ -326,6 +331,7 @@ struct GlmDense::Impl {
         std::vector<ggml_gallocr_t> allo_finish;   // [NT + 1] (NULL for n > kSmallN: allo_big)
         ggml_cgraph * gf_predict = nullptr;
         ggml_tensor * predict_out = nullptr;
+        bool fused_next = false;   // gf_finish[1] also computes predict(il+1) into pred_sel
         ggml_gallocr_t allo_predict = nullptr;
     };
     std::vector<Layer> ly;
@@ -347,7 +353,7 @@ struct GlmDense::Impl {
             // graph's own tensors (they point into a compute buffer that a later, bigger plan may have freed)
             // (compare pointers only: a stale buffer pointer must not be dereferenced)
             auto persistent = [&](ggml_backend_buffer_t bb) {
-                if (bb == sbuf || bb == ibuf || bb == obuf || bb == lbuf) return true;
+                if (bb == sbuf || bb == ibuf || bb == obuf || bb == pbuf || bb == lbuf) return true;
                 for (ggml_backend_buffer_t wb : w.bufs) if (bb == wb) return true;
                 return false;
             };
@@ -394,6 +400,7 @@ struct GlmDense::Impl {
         if (sbuf) ggml_backend_buffer_free(sbuf);
         if (ibuf) ggml_backend_buffer_free(ibuf);
         if (obuf) ggml_backend_buffer_free(obuf);
+        if (pbuf) ggml_backend_buffer_free(pbuf);
         if (lbuf) ggml_backend_buffer_free(lbuf);
         if (lctx) ggml_free(lctx);
         if (sctx) ggml_free(sctx);
@@ -681,6 +688,19 @@ static ggml_cgraph * build_finish(GlmDense::Impl & im, int il, int64_t n) {
     if (im.gate_taps)
         ggml_build_forward_expand(gf, ggml_cpy(gc, lout, ggml_view_3d(gc, L.t_lout, D, HC, n, L.t_lout->nb[1],
                                                                       L.t_lout->nb[2], 0)));
+    // fused predict (s28): the next routed layer's selection scores from this layer's output - build_predict's ops on
+    // the values x_state now receives (lout), so the scores are the same; GlmDense::predict(il+1) only reads them
+    if (n == 1 && im.pred_sel && il + 1 < (int) im.ly.size() && im.ly[(size_t) il + 1].routed) {
+        const int nl = il + 1;
+        ggml_tensor * post = nullptr, * comb = nullptr;
+        ggml_tensor * pre = b.hc_pre(lout, b.BL(nl, "hc_attn_fn.weight"), b.BL(nl, "hc_attn_scale.weight"),
+                                     b.BL(nl, "hc_attn_base.weight"), &post, &comb);
+        ggml_tensor * rlog = ggml_mul_mat(gc, b.BL(nl, "ffn_gate_inp.weight"), b.rms_w(pre, b.BL(nl, "ffn_norm.weight")));
+        ggml_mul_mat_set_prec(rlog, GGML_PREC_F32);
+        ggml_tensor * sc = ggml_add(gc, ggml_sigmoid(gc, rlog), b.BL(nl, "exp_probs_b.bias"));
+        ggml_build_forward_expand(gf, ggml_cpy(gc, sc, ggml_reshape_2d(gc, im.pred_sel, im.NEXP, 1)));
+        L.fused_next = true;
+    }
     L.gf_finish[(size_t) n] = gf;
     L.allo_finish[(size_t) n] = im.allo_for(n);
     return gf;
@@ -926,6 +946,16 @@ bool GlmDense::init(const std::string & model_path, const GlmDenseConfig & cfg, 
         }
         im.host_out.assign(lblk, 0);
     }
+    im.fused_pred = std::getenv("GLM_NO_FUSED_PREDICT") == nullptr;
+    if (im.fused_pred) {
+        im.pbuf = ggml_backend_buft_alloc_buffer(buft, (size_t) im.NEXP * 4 + al);
+        if (!im.pbuf) { err = "cannot allocate the fused predict output"; return false; }
+        im.pred_sel = ggml_new_tensor_1d(im.ictx, GGML_TYPE_F32, im.NEXP);
+        if (ggml_backend_tensor_alloc(im.pbuf, im.pred_sel, ggml_backend_buffer_get_base(im.pbuf)) != GGML_STATUS_SUCCESS) {
+            err = "cannot place the fused predict output";
+            return false;
+        }
+    }
 
     ggml_init_params gp = { 512ull * 1024 * 1024, nullptr, true };
     im.gctx = ggml_init(gp);
@@ -946,6 +976,7 @@ void GlmDense::reset() {
     Impl & im = *p_;
     ggml_backend_synchronize(im.backend);
     ggml_backend_buffer_clear(im.sbuf, 0);
+    im.pred_ready = -1;
     im.next_pos = 0;
     im.in_pos = -1;
     im.snap_pos = -1;
@@ -1000,6 +1031,7 @@ bool GlmDense::begin_tokens(const int * tids, int n) {
         else ggml_get_type_traits((ggml_type) im.embd_type)->to_float(row, dst, im.D);
     }
     ggml_backend_synchronize(im.backend);   // host_emb's previous upload / the previous token's work
+    im.pred_ready = -1;
     ggml_backend_tensor_set_async(im.backend, im.i_emb, im.host_emb.data(), 0, im.host_emb.size() * 4);
     if (ggml_backend_graph_compute_async(im.backend, im.gf_init[(size_t) n]) != GGML_STATUS_SUCCESS) {
         im.err = "init graph compute failed";
@@ -1014,10 +1046,15 @@ bool GlmDense::predict(int il, int * top_ids, int n_top) {
     Impl::Layer & L = im.ly[(size_t) il];
     for (int i = 0; i < n_top; ++i) top_ids[i] = -1;
     if (!L.routed) return false;
-    if (!im.alloc(L.allo_predict, L.gf_predict)) { im.err = "gallocr(predict) failed"; return false; }
-    if (ggml_backend_graph_compute_async(im.backend, L.gf_predict) != GGML_STATUS_SUCCESS) { im.err = "predict compute failed"; return false; }
     std::vector<float> sel((size_t) ggml_nelements(L.predict_out));
-    ggml_backend_tensor_get_async(im.backend, L.predict_out, sel.data(), 0, sel.size() * 4);
+    if (im.pred_ready == il) {   // finish(il-1) already computed it
+        ggml_backend_tensor_get_async(im.backend, im.pred_sel, sel.data(), 0, sel.size() * 4);
+    } else {
+        if (!im.alloc(L.allo_predict, L.gf_predict)) { im.err = "gallocr(predict) failed"; return false; }
+        if (ggml_backend_graph_compute_async(im.backend, L.gf_predict) != GGML_STATUS_SUCCESS) { im.err = "predict compute failed"; return false; }
+        ggml_backend_tensor_get_async(im.backend, L.predict_out, sel.data(), 0, sel.size() * 4);
+    }
+    im.pred_ready = -1;
     ggml_backend_synchronize(im.backend);
     std::vector<int> idx(sel.size());
     for (size_t i = 0; i < sel.size(); ++i) idx[i] = (int) i;
@@ -1180,6 +1217,7 @@ bool GlmDense::finish_layer_n(int il, int n, const float * routed_sum) {
     if (!L.allo_finish[(size_t) n]) L.allo_finish[(size_t) n] = im.allo_for(n);   // after release_big
     if (!im.alloc(L.allo_finish[(size_t) n], L.gf_finish[(size_t) n])) { im.err = "gallocr(finish) failed"; return false; }
     if (ggml_backend_graph_compute_async(im.backend, L.gf_finish[(size_t) n]) != GGML_STATUS_SUCCESS) { im.err = "finish compute failed"; return false; }
+    im.pred_ready = n == 1 && L.fused_next ? il + 1 : -1;
     if (im.gate_taps) ggml_backend_synchronize(im.backend);
     if (im.gate_taps)
         ggml_backend_tensor_get(L.t_lout, L.host_lout.data(), (size_t) (n - 1) * L.t_lout->nb[2], L.host_lout.size() * 4);

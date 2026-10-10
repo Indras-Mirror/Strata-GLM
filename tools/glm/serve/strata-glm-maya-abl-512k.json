@@ -33,6 +33,8 @@
   "--renorm-skip",
   "--pf-b",
   "1.0",
+  "--dense-requant",
+  "q4_k",
   "--pcie",
   "auto",
   "--census",
