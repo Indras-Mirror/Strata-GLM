@@ -12,7 +12,8 @@
 # Context: 524288 (512K; MLA latent cache ~6 GB VRAM, fewer expert slots -> decode ~7-9 tok/s)
 # Multi-turn: the engine snapshots the state at the end of every prompt; a follow-up that extends it reads only the
 #          new tokens.
-# Usage:   strata-glm-quetza [--stock] [--fast] [--full] [--300k|--max] [--maya] [--maya512] [--port=N] [-- <quetza args>]
+# DEFAULT (2026-10-10): Maya-S-v2 + our abliteration LoRA at 512K (= --maya); the RCO GGUF was deleted.
+# Usage:   strata-glm-quetza [--maya300] [--stock] [--port=N] [-- <quetza args>]
 #          --maya (= --maya512): GLM-5.3-Flash Maya-S-v2 (FP8-derived i-quants, NTFS NVMe) + our abliteration LoRA,
 #          512K context, the s26 stack (census, elastic VRAM cache + 6K-chunk MMQ prefill, q5_k dense, CPU+PCIe
 #          balance): measured ~390-430 tok/s prefill, ~25 tok/s decode.  port 8144.  --maya300: 300K, port 8143
@@ -35,26 +36,29 @@ CONFIG_MAYA512="$GLM_DIR/tools/glm/serve/strata-glm-maya-abl-512k.json"  # the s
 CONTEXT_SIZE=524288
 LOCAL_HOST="127.0.0.1"
 UNCENSORED=1
+MAYA=512   # default (2026-10-10): Maya-S-v2 + abliteration LoRA at 512K - the RCO file is retired
 FAST=0
 FULL=0
 MAX=0
-MAYA=0
 PORT_SET=0
 QUETZA_ARGS=()
 for arg in "$@"; do
     case "$arg" in
         --port=*)            LOCAL_PORT="${arg#--port=}"; PORT_SET=1 ;;
-        --stock|--censored)  UNCENSORED=0 ;;
+        --stock|--censored)  UNCENSORED=0; MAYA=stock ;;   # Maya without the abliteration LoRA
         --uncensored|--unc)  UNCENSORED=1 ;;
-        --fast)              FAST=1; UNCENSORED=1 ;;   # --skip-miss 0.15: 2x decode, a quality cost
-        --full|--ablated-full) FULL=1; UNCENSORED=1 ;;   # full routed-expert ablation + skip 0.15 + --renorm-skip
-        --300k|--max)        MAX=1; UNCENSORED=1 ;;     # --full at a real 300K context: more VRAM expert slots
+        --fast)  MAYA=512; UNCENSORED=1 ;;   # (RCO retired 2026-10-10: = the Maya default)
+        --full|--ablated-full)  MAYA=512; UNCENSORED=1 ;;   # (RCO retired 2026-10-10: = the Maya default)
+        --300k|--max)  MAYA=512; UNCENSORED=1 ;;   # (RCO retired 2026-10-10: = the Maya default)
         --maya|--maya512)    MAYA=512; UNCENSORED=1 ;;  # Maya-S-v2 + LoRA, 512K (costs ~nothing vs 300K), the s26 stack
         --maya300)           MAYA=300; UNCENSORED=1 ;;  # the same at 300K
         *)                   QUETZA_ARGS+=("$arg") ;;
     esac
 done
-if [ "$MAYA" = 300 ]; then
+if [ "$MAYA" = stock ]; then
+    CONFIG="$GLM_DIR/tools/glm/serve/strata-glm-maya-stock-512k.json"; [ "$PORT_SET" = 0 ] && LOCAL_PORT=8145
+    MODEL_NAME="glm-5.3-flash-maya-stock-512k"; CONTEXT_SIZE=524288
+elif [ "$MAYA" = 300 ]; then
     CONFIG="$CONFIG_MAYA"; [ "$PORT_SET" = 0 ] && LOCAL_PORT=8143; MODEL_NAME="glm-5.3-flash-maya-ablated-300k"
     CONTEXT_SIZE=307200
 elif [ "$MAYA" = 512 ]; then
