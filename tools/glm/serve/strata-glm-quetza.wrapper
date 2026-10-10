@@ -15,8 +15,9 @@
 # DEFAULT (2026-10-10): Maya-S-v2 + our abliteration LoRA at 512K (= --maya); the RCO GGUF was deleted.
 # Usage:   strata-glm-quetza [--maya300] [--stock] [--port=N] [-- <quetza args>]
 #          --maya (= --maya512): GLM-5.3-Flash Maya-S-v2 (FP8-derived i-quants, NTFS NVMe) + our abliteration LoRA,
-#          512K context, the s26 stack (census, elastic VRAM cache + 6K-chunk MMQ prefill, q5_k dense, CPU+PCIe
-#          balance): measured ~390-430 tok/s prefill, ~25 tok/s decode.  port 8144.  --maya300: 300K, port 8143
+#          512K context, the s28 stack (census, elastic VRAM cache + 4K-chunk MMQ prefill, q4_k dense, pf-b 1.0,
+#          64 GiB arena incl. soft-pruned experts, CPU+PCIe balance): measured ~400 tok/s prefill, ~27 tok/s decode;
+#          long prompts safe (100K verified).  port 8144.  --maya300: 300K, port 8143
 #          --300k / --max: the --full ablation at a REAL 300K context (ctx 307200; the MLA cache is no longer rounded
 #          up to 512K) -> ~2.2 GiB more VRAM expert slots than --full, port 8142 (FINDINGS s25d)
 #          --fast: --skip-miss 0.15 -> decode ~20.6 tok/s (vs ~9.7), a quality cost (see FINDINGS)
