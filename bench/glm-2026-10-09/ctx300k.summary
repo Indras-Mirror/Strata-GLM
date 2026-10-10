@@ -1,0 +1,20 @@
+--- parity ctx 4096 16:53:15 ---
+exit 0
+decode : 64 tokens, 63 forward passes in 23.47 s = 2.68 tok/s
+--- parity ctx 2560 16:56:44 ---
+exit 0
+decode : 64 tokens, 63 forward passes in 23.42 s = 2.69 tok/s
+parity: 1 rows, argmax agree 100.00%, max |dlogit| 0, mean 0
+--- serve300k 16:59:34 ---
+slots auto: 13.65 GiB free after the dense half -> 8.15 GiB of expert slots (margin 5.50 GiB)
+tier: gpu, 1059 resident slots, arena 66.7 GiB (8013 experts), file tier 0; load 88.5 s
+prefill: 2000 tokens in 12.65 s = 158.08 tok/s (chunked)
+decode : 128 tokens, 127 forward passes in 7.13 s = 17.82 tok/s
+exit 0, wall 115 s, VRAM peak 22358 MiB of 24564
+--- serve300k-lazy 17:01:29 ---
+slots auto: 13.70 GiB free after the dense half -> 8.20 GiB of expert slots (margin 5.50 GiB)
+tier: gpu, 1066 resident slots, arena 66.7 GiB (8006 experts), file tier 0; load 64.5 s
+prefill: 2000 tokens in 37.72 s = 53.02 tok/s (chunked)
+decode : 128 tokens, 127 forward passes in 7.26 s = 17.50 tok/s
+exit 0, wall 115 s, VRAM peak 22547 MiB of 24564
+=== ctx300k done 17:03:24 ===

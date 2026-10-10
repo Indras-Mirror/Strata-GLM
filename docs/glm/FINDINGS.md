@@ -687,3 +687,23 @@ after this.
 => the safe operating point is **~32-64K ctx at margin ~3-4 GiB**: most of the 2.7x, with scratch room. The 512K KV
 (~6 GiB) buys long context at the cost of ~half the VRAM expert cache; use it only when a long prompt needs it.
 Sweep: `bench/glm-2026-10-09/vram-margin.summary`.
+
+## s25d (2026-10-10 17:00): the real 300K context + Maya-S-v2 wiring (bench/glm-2026-10-09/gate-ctx300k.sh, ctx300k.summary)
+- **`--ctx 307200` used to allocate the 512K MLA cache** (CAPMAX = next_pow2). Now ctx rounds to 256. Served ablated
+  config (`strata-glm-unc-ablated-300k.json`, margin 5.5, chunk-mmq, eval_code 2000 + 128):
+
+  | ctx | free after dense | slots | prefill | decode | VRAM peak |
+  |---|---|---|---|---|---|
+  | 512K (s25) | 11.15 GiB | 734 | 135.6 tok/s | 16.27 tok/s | - |
+  | **300K real** | 13.65 GiB | **1059** | **158.1** | **17.82** | 22358 / 24564 MiB |
+  | 300K + `--arena-lazy` | 13.70 | 1066 | 53.0 (fill competes) | 17.50 | 22547 |
+
+- Parity ctx 4096 vs 2560 (cross2300, indexer on, last bucket non-pow2): first-token logits bit-identical; greedy
+  64-id runs split at id ~25 - determinism re-run pending (gate-determinism.sh).
+- `--arena-lazy` does NOT pay on a warm page cache: still 64.5 s before serving (the slot seed), same 115 s wall, and
+  prefill drops to 53 tok/s while the fill runs. Not wired into serving.
+- `--allow-long-ctx` (dense MLA, no indexer) costs ~1 GiB: the s25c sweep used it, serving does not - its margin-1.5/3.5
+  OOMs (c_parts/c_x/c_stage) overstate the scratch.  At margin 5.5 the served peak leaves ~2.1 GiB unused: ~4.0 is the
+  next thing to try (untested).
+- Maya-S-v2 wiring (4439cf5a): IQ2_S/IQ3_XXS down kernels; split-aware tier geometry (shard 1 = blk.0-23 only);
+  block_count 46 - nextn_predict_layers. Armed: gate-maya.sh (s11 ppl + ablated 300K decode).
