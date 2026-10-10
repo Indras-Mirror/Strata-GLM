@@ -62,7 +62,21 @@ PolyStrata's "3 GB draft block" is a **separate file** from the model GGUF (thei
 So we do not need to touch our model file - we load the draft block alongside it, the way `mtp.cpp` already loads DS4's
 MTP from `dense.bin`.
 
-## Sources
+## RESULT (2026-10-10) - measured, not assumed
+
+Built PolyStrata with CUDA (`build/strata-poly`) and ran THEIR engine on OUR file + the fetched block:
+
+| arm | prompt | decode | VRAM experts | load |
+| --- | ---: | ---: | ---: | ---: |
+| `--no-draft` | 46.9 t/s | **5.05 t/s** | 40.1% (1413) | 13.0 s |
+| `--draft-model draft-block.gguf` | 55.1 t/s | **5.17 t/s (+2%)** | 33.2% (1379) | 9.7 s |
+
+The block is accurate - **70/82 drafts accepted (85%)** - but buys **~2%**, not 2x. Our OWN engine does 16-20 t/s on the
+same file, so on our hardware their engine is 3-4x slower (it has no RAM arena). **The draft is starved, not broken:**
+~31% of experts are non-resident, so the k-token verify multiplies *fetches*. The lever is residency - see
+`FAST_START.md` (context ~6 GiB + `--vram-margin` 5.5 GiB are ~11.5 GiB of the card that is not experts).
+
+Sources:
 
 - PolyStrata `docs/GLM.md` (the 47-51 vs 26.7-27.7 table) and `docs/BACKENDS.md`; `tools/mtp_fetch.py`/`mtp_pack.py`.
 - project-maya `tools/maya_quant/recipes/maya-s-v2.json` (the `blk.45` recipe) and `src/core/mtp.cpp`, `src/spec/`.
