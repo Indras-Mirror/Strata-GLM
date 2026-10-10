@@ -1038,6 +1038,17 @@ void GlmDense::release_big() {
     im.allo_big = nullptr;
 }
 
+int GlmDense::safe_chunk(int pos0, int want) const {
+    const Impl & im = *p_;
+    static const int64_t lim = [] {
+        const char * e = std::getenv("GLM_CHUNK_CAPN");
+        return e ? (int64_t) std::atoll(e) : (int64_t) 65536 * 4096;
+    }();
+    int m = want;
+    while (m > 256 && im.cap_for((int64_t) pos0 + m - 1) * (int64_t) m > lim) m /= 2;
+    return m;
+}
+
 void GlmDense::set_route_bias(int il, const float * bias) {
     Impl & im = *p_;
     if (il < 0 || il >= (int) im.ly.size()) return;

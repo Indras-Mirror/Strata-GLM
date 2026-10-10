@@ -91,6 +91,10 @@ public:
     /// Frees the prompt chunks' shared compute buffer (re-acquired by the next chunk): its VRAM goes back to the
     /// device after a prompt, for the elastic expert cache.
     void release_big();
+    /// The largest prompt chunk (<= want) starting at pos0 whose MLA cap x chunk stays within the VRAM-safe
+    /// product (s28: the indexer's [pools x tokens] scratch grows with cap x n; 65536 x 4096 is the measured-safe size
+    /// at margin 7.5).  Halves the chunk for every cap doubling past 64K - long prompts slow down, never OOM.
+    int safe_chunk(int pos0, int want) const;
     bool begin_token(int tid) { return begin_tokens(&tid, 1); }
     /// Router hint for token 0 of the pass; false (no hint) on a dense layer.
     bool predict(int il, int * top_ids, int n_top);

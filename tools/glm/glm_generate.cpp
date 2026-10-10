@@ -575,8 +575,8 @@ int main(int argc, char ** argv) {
                 if (gone < 0) { ferr = "shrink_cache: " + serr; return false; }
                 if (gone > 0) std::fprintf(stderr, "serve: cache shrunk by %lld slots for a %d-token prompt\n", (long long) gone, n);
             }
-            for (int c0 = 0; c0 < n; c0 += NP) {
-                const int m = std::min(NP, n - c0);
+            for (int c0 = 0, m = 0; c0 < n; c0 += m) {
+                m = dense.safe_chunk(pos0 + c0, std::min(NP, n - c0));
                 if (!dense.begin_tokens(ids + c0, m)) { ferr = dense.last_error(); return false; }
                 for (int l = 0; l < n_layer; ++l) {
                     const bool moe = G.routed(l);
@@ -732,8 +732,9 @@ int main(int argc, char ** argv) {
         std::vector<int32_t> cids32((size_t) NP * top_k);
         std::vector<float> cw((size_t) NP * top_k), crouted((size_t) NP * n_embd), lrows;
         const int LR = 16;
-        for (size_t c0 = 0; c0 < prompt.size(); c0 += (size_t) NP) {
-            const int n = (int) std::min<size_t>((size_t) NP, prompt.size() - c0);
+        int n = 0;
+        for (size_t c0 = 0; c0 < prompt.size(); c0 += (size_t) n) {
+            n = dense.safe_chunk((int) c0, (int) std::min<size_t>((size_t) NP, prompt.size() - c0));
             if (a.route_bias != 0.0f && !mc.cpu_only) set_bias();
             if (!dense.begin_tokens(prompt.data() + c0, n)) { std::fprintf(stderr, "glm_generate: %s\n", dense.last_error().c_str()); return 1; }
             int ri = 0;
@@ -763,6 +764,11 @@ int main(int argc, char ** argv) {
                 t1 = now_ms(); pc_exp += t1 - t0; t0 = t1;
                 if (!dense.finish_layer_n(l, n, moe ? crouted.data() : nullptr)) { std::fprintf(stderr, "glm_generate: %s\n", dense.last_error().c_str()); return 1; }
                 pc_fin += now_ms() - t0;
+            }
+            if (std::getenv("GLM_VRAM_TRACE")) {   // per-chunk device headroom (long-prompt scratch growth)
+                size_t fr = 0, tot = 0;
+                ggml_backend_dev_memory(ggml_backend_get_device(be), &fr, &tot);
+                std::fprintf(stderr, "vram-trace: chunk end pos %zu: %.0f MiB free\n", c0 + (size_t) n, fr / 1048576.0);
             }
             if (rfile) {   // whole 512-token blocks only (a chunk may straddle a block edge: the excess is dropped)
                 rblock_n = std::min(RB, rblock_n + n);
