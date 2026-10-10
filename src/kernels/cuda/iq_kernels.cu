@@ -3691,6 +3691,16 @@ __global__ void __launch_bounds__(256) lora_down_kernel(const int32_t* __restric
     for (int64_t j = t; j < n_embd; j += blockDim.x) o[j] += bd[j] * S;
 }
 
+// The down correction alone, for products that are not native_expert_grouped (the MMQ chunk path): entry i of
+// [0, n) has expert ent_exp[i], its float SwiGLU row h[i * n_ff ..], and writes row ent_dst[i] of `out`.
+void native_expert_lora_down(const NativeExpertLora& lora, const int32_t* ent_exp, const int32_t* ent_dst,
+                             const float* h, int64_t n_ff, int64_t n_embd, int32_t n, float* out, void* stream) {
+    if (!lora.a_d || n <= 0) return;
+    lora_down_kernel<<<(unsigned) n, 256, 0, (cudaStream_t) stream>>>(ent_exp, ent_dst, lora.a_d, lora.b_d, h, n_ff, n_embd,
+                                                                      lora.n_experts, 0, n, out);
+    check("native_expert_lora_down");
+}
+
 void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long* grp_ptr, const int32_t* grp_start,
                            const int32_t* n_groups, const int32_t* ent_dst, const int32_t* ent_tok, int64_t cap_groups,
                            int64_t cap_entries, const void* x_q8_1, void* scratch, float* out, void* stream,

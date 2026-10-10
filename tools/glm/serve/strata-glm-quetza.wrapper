@@ -12,7 +12,10 @@
 # Context: 524288 (512K; MLA latent cache ~6 GB VRAM, fewer expert slots -> decode ~7-9 tok/s)
 # Multi-turn: the engine snapshots the state at the end of every prompt; a follow-up that extends it reads only the
 #          new tokens.
-# Usage:   strata-glm-quetza [--stock] [--fast] [--full] [--300k|--max] [--port=N] [-- <quetza args>]
+# Usage:   strata-glm-quetza [--stock] [--fast] [--full] [--300k|--max] [--maya] [--maya512] [--port=N] [-- <quetza args>]
+#          --maya: GLM-5.3-Flash Maya-S-v2 (peasantsmith, FP8-derived i-quants, on the NTFS NVMe) + our abliteration LoRA,
+#          300K context, every s26 improvement (census, vram-lru pin, CPU+PCIe balance, MMQ prefill), port 8143
+#          --maya512: the same at a 512K context, port 8144
 #          --300k / --max: the --full ablation at a REAL 300K context (ctx 307200; the MLA cache is no longer rounded
 #          up to 512K) -> ~2.2 GiB more VRAM expert slots than --full, port 8142 (FINDINGS s25d)
 #          --fast: --skip-miss 0.15 -> decode ~20.6 tok/s (vs ~9.7), a quality cost (see FINDINGS)
@@ -27,12 +30,15 @@ CONFIG_FAST="$GLM_DIR/tools/glm/serve/strata-glm-unc-fast.json"
 CONFIG_STOCK="$GLM_DIR/tools/glm/serve/strata-glm.json"
 CONFIG_ABLATED="$GLM_DIR/tools/glm/serve/strata-glm-unc-ablated.json"   # full routed-expert abliteration + skip 0.15 + --renorm-skip
 CONFIG_MAX="$GLM_DIR/tools/glm/serve/strata-glm-unc-ablated-300k.json"   # the same at a real 300K context (more expert slots)
+CONFIG_MAYA="$GLM_DIR/tools/glm/serve/strata-glm-maya-abl-300k.json"     # Maya-S-v2 + LoRA, 300K, the s26 stack
+CONFIG_MAYA512="$GLM_DIR/tools/glm/serve/strata-glm-maya-abl-512k.json"  # the same at 512K
 CONTEXT_SIZE=524288
 LOCAL_HOST="127.0.0.1"
 UNCENSORED=1
 FAST=0
 FULL=0
 MAX=0
+MAYA=0
 PORT_SET=0
 QUETZA_ARGS=()
 for arg in "$@"; do
@@ -43,10 +49,18 @@ for arg in "$@"; do
         --fast)              FAST=1; UNCENSORED=1 ;;   # --skip-miss 0.15: 2x decode, a quality cost
         --full|--ablated-full) FULL=1; UNCENSORED=1 ;;   # full routed-expert ablation + skip 0.15 + --renorm-skip
         --300k|--max)        MAX=1; UNCENSORED=1 ;;     # --full at a real 300K context: more VRAM expert slots
+        --maya)              MAYA=300; UNCENSORED=1 ;;  # Maya-S-v2 + LoRA, 300K, the s26 stack
+        --maya512)           MAYA=512; UNCENSORED=1 ;;  # the same at 512K
         *)                   QUETZA_ARGS+=("$arg") ;;
     esac
 done
-if [ "$MAX" = 1 ]; then
+if [ "$MAYA" = 300 ]; then
+    CONFIG="$CONFIG_MAYA"; [ "$PORT_SET" = 0 ] && LOCAL_PORT=8143; MODEL_NAME="glm-5.3-flash-maya-ablated-300k"
+    CONTEXT_SIZE=307200
+elif [ "$MAYA" = 512 ]; then
+    CONFIG="$CONFIG_MAYA512"; [ "$PORT_SET" = 0 ] && LOCAL_PORT=8144; MODEL_NAME="glm-5.3-flash-maya-ablated-512k"
+    CONTEXT_SIZE=524288
+elif [ "$MAX" = 1 ]; then
     CONFIG="$CONFIG_MAX"; [ "$PORT_SET" = 0 ] && LOCAL_PORT=8142; MODEL_NAME="glm-5.3-flash-strata-ablated-300k"
     CONTEXT_SIZE=307200
 elif [ "$FULL" = 1 ]; then

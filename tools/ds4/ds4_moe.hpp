@@ -273,6 +273,9 @@ struct Ds4MoeConfig {
     /// conversation (route_probe sim, 1800 slots: static 40.5% held-out hit, LRU 61.6%; FINDINGS s16).  Same math per
     /// expert; only where the blob sits changes.  Off = the static seed, as before.
     bool vram_lru = false;
+    /// vram_lru: the first `vram_pin_frac` of the seeded slots (the ranked order's head - the census-hot core) are
+    /// never LRU victims; the rest of the cache follows the conversation (helios pins the census top 60%).
+    double vram_pin_frac = 0.0;
     /// GLM abliteration LoRA (routed experts): per-layer rank-1 deltas, an array of `n_layers` entries or null (the
     /// default: off).  The grouped CUDA path applies them; the CPU pool and the MMQ chunk path do not (yet).
     const Ds4MoeLoraHost* lora = nullptr;
@@ -395,6 +398,11 @@ public:
     /// size, leaving `keep_free_gib` of VRAM free - and fill the new slots with the next experts of the seed's
     /// ranking (arena copies, else file reads).  Returns the slots added (0 when not elastic), -1 on error (`err`).
     int64_t grow_cache(double keep_free_gib, std::string& err);
+    /// The per-request elastic cache (s26): before a long prompt, forget + unmap every slot past the prompt's
+    /// budget (cfg.slot_gib), so the chunk scratch can use that VRAM; `grow_cache` after the prompt maps it again
+    /// and refills it from the pinned arena (the seed's order, so each slot gets back the expert it was sized for).
+    /// Needs the elastic cache (slot_gib_max) and a static seed (no vram_lru).  Returns the slots given up.
+    int64_t shrink_cache(std::string& err);
     /// REAP accumulators (Ds4MoeConfig::saliency), [layer * n_experts + expert]; empty when off.
     const std::vector<double>& saliency_sum() const;
     const std::vector<int64_t>& saliency_count() const;

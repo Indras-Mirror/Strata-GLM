@@ -58,6 +58,9 @@ struct Args {
     bool ppl = false, vram_lru = false, arena_adapt = false, arena_skip = false;
     int prefill_chunk = 0;           // --prefill-chunk N: the prompt in passes of N tokens (0 = the decode loop)
     bool chunk_mmq = false, chunk_prestage = false, allow_long = false;
+    int dense_requant = -1;          // --dense-requant q4_k|q5_k: the dense half's Q6_K matrices at load
+    std::string census;              // --census FILE: persistent per-(layer, expert) decode use counts (helios-style)
+    float vram_pin = 0.0f;           // --vram-pin F: with --vram-lru, the top F of the seeded slots are never evicted
 };
 
 std::vector<int> parse_csv(const std::string & s) {
@@ -85,7 +88,7 @@ bool parse(int argc, char ** argv, Args & a) {
         else if (k == "--slots") { const std::string v = next(); a.slots = v == "auto" ? 0 : std::atoll(v.c_str()); }
         else if (k == "--vram-margin") a.vram_margin_gib = std::atof(next().c_str());
         else if (k == "--vram-grow") a.vram_grow_keep = std::atof(next().c_str());
-        else if (k == "--pcie") a.pcie = std::atof(next().c_str());
+        else if (k == "--pcie") { const std::string v = next(); a.pcie = v == "auto" ? -1.0 : std::atof(v.c_str()); }   // auto: balance the card and the pool (FreeToken)
         else if (k == "--pf-b") a.pf_b = std::atof(next().c_str());
         else if (k == "--profile") a.profile = next();
         else if (k == "--arena-gib") a.arena_gib = std::atof(next().c_str());
@@ -115,11 +118,15 @@ bool parse(int argc, char ** argv, Args & a) {
         else if (k == "--skip-file-prefill") a.skip_file_chunk = (float) std::atof(next().c_str());
         else if (k == "--renorm-skip") a.renorm_skip = true;
         else if (k == "--arena-lazy") a.arena_lazy = true;
+        else if (k == "--census") a.census = next();
+        else if (k == "--dense-requant") { const std::string v = next(); a.dense_requant = v == "q4_k" ? (int) GGML_TYPE_Q4_K : v == "q5_k" ? (int) GGML_TYPE_Q5_K : -1; }
+        else if (k == "--vram-pin") a.vram_pin = (float) std::atof(next().c_str());
         else if (k == "--arena-admit") a.arena_admit = (float) std::atof(next().c_str());
         else if (k == "--prune-penalty") a.prune_penalty = (float) std::atof(next().c_str());
         else { std::fprintf(stderr, "glm_generate: unknown argument %s\n", k.c_str()); return false; }
     }
-    if (a.serve) a.vram_grow_keep = 0.0;   // the elastic cache's grow is one-shot: every request needs the chunk VRAM
+    // (--serve keeps --vram-grow since s26: the cache shrinks before every long prompt and grows back after it -
+    // Ds4MoeTier::shrink_cache / grow_cache - so each request's chunks get their VRAM and its decode the full cache)
     return !a.model.empty() && (a.serve || !a.ids_csv.empty() || !a.ids_file.empty());
 }
 
@@ -217,6 +224,7 @@ int main(int argc, char ** argv) {
     dc.ctx = a.ctx > 0 ? a.ctx : (int64_t) prompt.size() + a.n_predict + 8;
     dc.max_tokens = std::max(1, a.prefill_chunk);
     dc.allow_long_ctx = a.allow_long;
+    dc.dense_requant = a.dense_requant;
     std::string err;
     if (!dense.init(a.model, dc, err)) { std::fprintf(stderr, "glm_generate: dense init: %s\n", err.c_str()); return 1; }
     const GlmGeometry & G = dense.geom();
@@ -302,6 +310,10 @@ int main(int argc, char ** argv) {
     mc.max_arena_gib = a.arena_gib;
     mc.cpu_only = a.experts == "cpu";
     mc.vram_lru = a.vram_lru;
+    if (slot_gib_max > 0 && mc.vram_lru) {   // the elastic regrow re-admits in the seed's order: slots must not move
+        mc.vram_lru = false;
+        std::fprintf(stderr, "vram-grow: --vram-lru off (the elastic cache needs the static seed)\n");
+    }
     mc.arena_adapt = a.arena_adapt;
     mc.arena_skip_resident = a.arena_skip;
     mc.chunk_mmq = a.chunk_mmq;
@@ -314,17 +326,20 @@ int main(int argc, char ** argv) {
     mc.skip_miss = a.skip_miss;   // decode: drop a VRAM-miss expert weighing < skip_miss x the token's weight sum
     mc.renorm_skip = a.renorm_skip;   // rescale the sum by the surviving weight fraction (default off)
     mc.arena_lazy = a.arena_lazy;     // fill the arena in the background (serve off the file tier meanwhile)
+    mc.vram_pin_frac = a.vram_pin;    // --vram-lru: the census-hot core of the seed is never evicted
     mc.lora = lora_host.empty() ? nullptr : lora_host.data();   // routed-expert deltas (--lora-exps)
     if (a.lora_exps) {
-        mc.pcie_frac = 1.0;   // the deltas apply on the GPU grouped path only: every miss goes there
-        if (mc.chunk_mmq) {   // MMQ chunks are NOT instrumented: un-ablated prefill + ablated decode = a broken model
+        // The CPU pool applies the down delta too now (ExpertJobMulti::lora_a/b), so --pcie is the user's again;
+        // GLM_LORA_PCIE1=1 keeps the old forced 1.0 (every miss on the GPU grouped path) for A/B.
+        if (std::getenv("GLM_LORA_PCIE1")) mc.pcie_frac = 1.0;
+        // (--chunk-mmq stays: the MMQ chunk path adds the down delta too - native_expert_lora_down after each down
+        // product - so a chunk and a decode are ablated the same.  GLM_LORA_MMQ_OFF=1: the old behaviour, for A/B.)
+        if (mc.chunk_mmq && std::getenv("GLM_LORA_MMQ_OFF")) {
             mc.chunk_mmq = false;
-            std::fprintf(stderr, "lora-exps: --chunk-mmq off (the MMQ chunk path does not apply the deltas; a "
-                                 "chunk and a decode must be ablated the same or the model is inconsistent)\n");
+            std::fprintf(stderr, "lora-exps: --chunk-mmq off (GLM_LORA_MMQ_OFF)\n");
         }
-        std::fprintf(stderr, "lora-exps: pcie_frac -> 1.0 (the routed-expert deltas are applied by the GPU grouped "
-                             "path; a file-tier expert is computed by the CPU pool and would NOT be ablated - keep "
-                             "the whole routed set in the arena, e.g. --prune + --arena-gib 72)\n");
+        std::fprintf(stderr, "lora-exps: pcie_frac %.2f (GPU grouped, MMQ chunk and CPU pool paths all apply the "
+                             "down delta)\n", mc.pcie_frac);
         // The skip heuristics drop a low-weight expert READ on the miss path - a dropped expert contributes nothing
         // AND loses its delta, so the ablation stops being all-or-nothing (same failure mode as the MMQ chunk above:
         // the model degenerates into repetition loops, e.g. "import LPVOID, LPVOID, ..." and never terminates).
@@ -356,6 +371,35 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "prune: %lld (layer, expert) pairs masked out of routing (%s)\n", (long long) n_pruned, a.prune.c_str());
     }
     auto is_pruned = [&](int64_t l, int64_t e) { return pruned[(size_t) (l * G.n_expert + e)] != 0; };
+    // --census FILE (helios' .census): long-run decode use per (layer, expert), read to rank the VRAM slots and the
+    // arena, counted during decode, written back after every request.  The in-process heat (arena_adapt, vram_lru)
+    // follows the last few tokens; a prompt floods it.  The census is what the model actually uses, across restarts.
+    std::vector<double> census((size_t) (G.n_layer * G.n_expert), 0.0);
+    int64_t census_n = 0;
+    if (!a.census.empty()) {
+        if (std::FILE * cf = std::fopen(a.census.c_str(), "r")) {
+            char line[256];
+            long l, e;
+            double c;
+            while (std::fgets(line, sizeof line, cf))
+                if (line[0] != '#' && std::sscanf(line, "%ld %ld %lf", &l, &e, &c) == 3 && l >= 0 && l < G.n_layer &&
+                    e >= 0 && e < G.n_expert && c > 0) { census[(size_t) (l * G.n_expert + e)] = c; ++census_n; }
+            std::fclose(cf);
+        }
+        std::fprintf(stderr, "census: %lld (layer, expert) counts from %s\n", (long long) census_n, a.census.c_str());
+    }
+    auto save_census = [&]() {
+        if (a.census.empty()) return;
+        const std::string tmp = a.census + ".tmp";
+        std::FILE * cf = std::fopen(tmp.c_str(), "w");
+        if (!cf) return;
+        std::fprintf(cf, "# glm_generate census: layer expert decode-uses\n");
+        for (int64_t l = 0; l < G.n_layer; ++l)
+            for (int64_t e = 0; e < G.n_expert; ++e)
+                if (census[(size_t) (l * G.n_expert + e)] > 0)
+                    std::fprintf(cf, "%lld %lld %.0f\n", (long long) l, (long long) e, census[(size_t) (l * G.n_expert + e)]);
+        if (std::fclose(cf) == 0) std::rename(tmp.c_str(), a.census.c_str());
+    };
     if (!tier.init(a.model, mc, err)) { std::fprintf(stderr, "glm_generate: tier init: %s\n", err.c_str()); return 1; }
     const ds4::Ds4MoeGeom & TG = tier.geom();
     if (!mc.cpu_only) {
@@ -371,6 +415,12 @@ int main(int argc, char ** argv) {
             for (int64_t l : lorder)
                 for (int64_t e = 0; e < TG.n_experts; ++e)
                     if (!is_pruned(l, e)) ranked.emplace_back((int32_t) l, (int32_t) e);
+            if (census_n > 0)   // the census first: uses per byte (a VRAM slot costs its blob), unseen experts after
+                std::stable_sort(ranked.begin(), ranked.end(), [&](const auto & x, const auto & y) {
+                    const double cx = census[(size_t) (x.first * G.n_expert + x.second)] / (double) tier.blob_bytes(x.first);
+                    const double cy = census[(size_t) (y.first * G.n_expert + y.second)] / (double) tier.blob_bytes(y.first);
+                    return cx > cy;
+                });
             ok = tier.seed_from_ranked(ranked, err);
         }
         if (!ok) { std::fprintf(stderr, "glm_generate: seed: %s\n", err.c_str()); return 1; }
@@ -435,6 +485,9 @@ int main(int argc, char ** argv) {
             if (timing) { t1 = now_ms(); t_ph[1] += t1 - t0; t0 = t1; }
             if (moe) {
                 for (int k = 0; k < top_k; ++k) ids32[(size_t) k] = ids_i[(size_t) k];
+                if (!a.census.empty())
+                    for (int k = 0; k < top_k; ++k)
+                        if (ids_i[(size_t) k] >= 0) census[(size_t) (l * G.n_expert + ids_i[(size_t) k])] += 1.0;
                 if (rfile) {
                     uint16_t * dst = rblock.data() + ((size_t) ri * RB + rblock_n) * top_k;
                     for (int k = 0; k < top_k; ++k) dst[k] = (uint16_t) ids_i[(size_t) k];
@@ -514,6 +567,14 @@ int main(int argc, char ** argv) {
                 std::copy(lg, lg + nv, last_logits.begin());
                 return true;
             }
+            // the per-request elastic cache: a long prompt borrows the cache's tail for its chunk scratch
+            const bool elastic_req = slot_gib_max > 0 && n > 256;
+            if (elastic_req) {
+                std::string serr;
+                const int64_t gone = tier.shrink_cache(serr);
+                if (gone < 0) { ferr = "shrink_cache: " + serr; return false; }
+                if (gone > 0) std::fprintf(stderr, "serve: cache shrunk by %lld slots for a %d-token prompt\n", (long long) gone, n);
+            }
             for (int c0 = 0; c0 < n; c0 += NP) {
                 const int m = std::min(NP, n - c0);
                 if (!dense.begin_tokens(ids + c0, m)) { ferr = dense.last_error(); return false; }
@@ -531,6 +592,10 @@ int main(int argc, char ** argv) {
                 progress(c0 + m);
             }
             tier.release_chunk();
+            if (elastic_req) {
+                std::string gerr;
+                if (tier.grow_cache(a.vram_grow_keep, gerr) < 0) { ferr = "grow_cache: " + gerr; return false; }
+            }
             return true;
         };
         auto is_stop = [&](int t) { return std::find(a.stop.begin(), a.stop.end(), t) != a.stop.end(); };
@@ -639,6 +704,7 @@ int main(int argc, char ** argv) {
             }
             std::fprintf(stderr, "serve: %d tokens in %.2f s = %.2f tok/s (%s)\n", gen, dec_ms / 1000.0,
                          1000.0 * std::max(0, gen - 1) / std::max(dec_ms, 1e-9), finish);
+            save_census();
             std::printf("DONE %d %d %.1f %.1f %s 0 0 %d %lld %lld 0 %lld 0 %d\n", gen, total, prompt_ms, dec_ms, finish,
                         reused, (long long) st.hits, (long long) st.lookups(), (long long) st.file_tier, total - reused);
             std::fflush(stdout);
@@ -824,6 +890,7 @@ int main(int argc, char ** argv) {
         ggml_backend_dev_memory(ggml_backend_get_device(be), &fr, &tot);
         std::fprintf(stderr, "VRAM free at the end: %.2f GiB\n", fr / 1073741824.0);
     }
+    save_census();
     tier.close();
     ggml_backend_free(be);
     return 0;

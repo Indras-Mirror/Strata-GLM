@@ -61,6 +61,12 @@ struct ExpertJobMulti {
     float* out[MAXT] = {};
     /// Plan v0.3 P6: a native pack's activations (the layer's `vec_dot_type`), one per token.
     const void* nact[MAXT] = {};
+    /// GLM routed-expert LoRA (optional, run_split_multi_native): this expert's down factors, a [n_ff] and b
+    /// [n_embd].  The pool adds (a . h) * b to each token's `out` after the down product - the same correction the
+    /// GPU's lora_down_kernel makes, so a CPU-computed expert is ablated like a GPU one.  null = off.
+    const float* lora_a = nullptr;
+    const float* lora_b = nullptr;
+    float lora_s[MAXT] = {};
 };
 
 /// How worker threads are allocated across physical/logical CPU cores (#272).  `All` is the layout the pool has

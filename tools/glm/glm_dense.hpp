@@ -65,6 +65,10 @@ struct GlmDenseConfig {
     /// targets (`attn_output`, `ffn_down_shexp`) in the graph as y += B (A x); the routed experts' adapter entries
     /// are Ds4MoeTier's (set separately on the tier).  The adapter must outlive the GlmDense.
     const strata::glm::LoraAdapter * lora = nullptr;
+    /// Requantize the dense half's Q6_K matrices (attention, shared experts, dense FFN, output head) to this ggml
+    /// type at load (-1 = keep).  Maya-S-v2 -> Q4_K = Maya-S24's layout (its card: +14% decode on a 24 GB card,
+    /// 97.7% vs 97.9% of FP8): ~1.9 GB less dense read per token and ~1.9 GB more VRAM for expert slots.
+    int dense_requant = -1;
 };
 
 class GlmDense {

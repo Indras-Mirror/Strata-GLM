@@ -1,0 +1,59 @@
+--- A-base (margin 5.5, chunk 1024 GLM_LORA_MMQ_OFF=1 ) 18:46:26 ---
+slots auto: 11.98 GiB free after the dense half -> 6.48 GiB of expert slots (margin 5.50 GiB)
+tier: gpu, 992 resident slots, arena 53.6 GiB (8080 experts), file tier 0; load 183.2 s
+prefill: 12736 tokens in 62.21 s = 204.72 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 11.76 s = 21.69 tok/s
+experts/token: hit 23.9% (prefetched-useful 46.1/token of 60.0 issued), cpu 0.6%, pcie 10.8%, file tier 522, skipped 217.5/token
+tier moves: vram_lru swaps 0.00/pass (demoted 0), arena swaps 433 (admit rejects 0), file reads 3.94 ms/pass, file-tier skipped 6064
+  exit 0, VRAM peak 23183 MiB
+  text [225 ids]: 'Let me analyze this code carefully. This is C++ inference engine for a hybridattention MoE model (GLM5 style with KDA/ML — actually "MLA" here "Multi-metric-MLA — the code says "MLA as in the model class name, the comment says "MLA over earlier position" — wait, looking the code, the attention is eitherDA (kDA) or MLAmulti-head light... no, it "MLA" as in theSeek MLA (Multi-head Lattice). Let me re-read.\n\nActually looking at the code: `buildtn` has `L.kda and `L.routed` — else branch is the MLA branch. comment says "MLA over every position (phase 1...)" MLA here is "MLA" in the attention varia'
+--- B-mmq (margin 5.5, chunk 1024 X=1 ) 18:50:50 ---
+slots auto: 11.98 GiB free after the dense half -> 6.48 GiB of expert slots (margin 5.50 GiB)
+tier: gpu, 992 resident slots, arena 53.6 GiB (8080 experts), file tier 0; load 82.0 s
+prefill: 12736 tokens in 58.47 s = 217.84 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 11.59 s = 22.00 tok/s
+experts/token: hit 23.8% (prefetched-useful 45.7/token of 60.0 issued), cpu 0.7%, pcie 10.6%, file tier 571, skipped 218.3/token
+tier moves: vram_lru swaps 0.00/pass (demoted 0), arena swaps 474 (admit rejects 0), file reads 4.12 ms/pass, file-tier skipped 5662
+  exit 0, VRAM peak 23725 MiB
+  text [225 ids]: 'Let me analyze this C++ inference engine for hybrid-attention MoE model (M-architecture-based model, likely-adjunct/„glm5“-style with KDA/ML hybrid attention). The user asks to how a prompt is processed in chunks i.e., the chunked pre / decode pipeline: what each graph (init, attention, finish,), what state is kept between chunksx_state, KV caches, conv, indexer tail/pool), and the KV cache/indexer are used Then point out one concrete bug risk inefficiency.\n\nLet me trace through code carefully.\n\n**Overview of the** (from the parts given, in the rest of the file formatThe code is for a hybrid- '
+--- C-census (margin 5.5, chunk 1024 X=1 --census bench/glm-2026-10-09/mi-C.census) 18:53:27 ---
+slots auto: 11.98 GiB free after the dense half -> 6.48 GiB of expert slots (margin 5.50 GiB)
+census: 11769 (layer, expert) counts from bench/glm-2026-10-09/mi-C.census
+tier: gpu, 983 resident slots, arena 53.6 GiB (8089 experts), file tier 0; load 78.2 s
+prefill: 12736 tokens in 57.27 s = 222.38 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 10.93 s = 23.33 tok/s
+experts/token: hit 34.1% (prefetched-useful 48.0/token of 60.1 issued), cpu 0.7%, pcie 7.6%, file tier 623, skipped 193.3/token
+tier moves: vram_lru swaps 0.00/pass (demoted 0), arena swaps 623 (admit rejects 0), file reads 4.49 ms/pass, file-tier skipped 5688
+  exit 0, VRAM peak 23640 MiB
+  text [225 ids]: 'Let me carefully trace through this code to understand architecture.\n\nThe user asks: "plain how a prompt is processed in here (what each graph does, state is kept between chunks, and the KV cache and the indexer are), then point out one concrete bug or inefficiency."\n\nWait — "plain how a prompt is processed in here" — the "here" refers to "in this code"i.e., in this codebase). So they want an explanation of chunked prefill mechanism: how prompt (sequence of tokens) is in chunks by this inference engine.\n\n me parse the code. This is GLM (e.g., GL-4.5 / GLM5-next style hybrid MoE model inference'
+--- D-lru (margin 5.5, chunk 1024 X=1 --census bench/glm-2026-10-09/mi-D.census --vram-lru --vram-pin 0.6) 18:55:58 ---
+slots auto: 12.11 GiB free after the dense half -> 6.61 GiB of expert slots (margin 5.50 GiB)
+census: 11769 (layer, expert) counts from bench/glm-2026-10-09/mi-D.census
+tier: gpu, 1002 resident slots, arena 53.5 GiB (8070 experts), file tier 0; load 76.7 s
+prefill: 12736 tokens in 57.21 s = 222.63 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 11.43 s = 22.32 tok/s
+experts/token: hit 44.9% (prefetched-useful 42.8/token of 60.1 issued), cpu 0.7%, pcie 5.0%, file tier 587, skipped 166.0/token
+tier moves: vram_lru swaps 16.92/pass (demoted 4314), arena swaps 587 (admit rejects 0), file reads 4.17 ms/pass, file-tier skipped 6081
+  exit 0, VRAM peak 23764 MiB
+  text [225 ids]: 'Let me look at this code carefully. This a C++ inference engine for a-attention MoE model (GL-5-next style, similar toSeek MLA + KDA hybrid). user asks: "Explain how prompt is processed in chunks here ( each graph does, what state is between chunks, and how the KV and the indexer are used), then out one concrete bug risk or ineff."\n\nSo I need to:\n1 Explain how a prompt is processed in — what each graph does (build, build_attn per layer,_finish, build_head, build_predict what state is kept between chunks, the KV cache and indexer are used2. Point out one concrete bug or inefficiency.\n\nLet me ca'
+--- E-chunk4k (margin 9, chunk 4096 X=1 --census bench/glm-2026-10-09/mi-E.census --vram-lru --vram-pin 0.6) 18:58:29 ---
+slots auto: 11.53 GiB free after the dense half -> 2.53 GiB of expert slots (margin 9.00 GiB)
+census: 11769 (layer, expert) counts from bench/glm-2026-10-09/mi-E.census
+tier: gpu, 384 resident slots, arena 57.6 GiB (8688 experts), file tier 0; load 97.6 s
+prefill: 12736 tokens in 33.51 s = 380.03 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 12.46 s = 20.47 tok/s
+experts/token: hit 34.8% (prefetched-useful 45.8/token of 60.1 issued), cpu 0.7%, pcie 6.5%, file tier 602, skipped 195.1/token
+tier moves: vram_lru swaps 18.07/pass (demoted 4608), arena swaps 602 (admit rejects 0), file reads 4.43 ms/pass, file-tier skipped 5909
+  exit 0, VRAM peak 21656 MiB
+  text [225 ids]: 'Let me carefully analyze this C++ inference engine for a hybrid-attention MoE (GLM-5-next style with MLA (Multi-head attention with-rank Admixture... actuallyMLA" = Multi-scale/... it\'s DeepSeek-style MLA Multi-head attention with Low-rank well, MLA = Multi-head attention low-rank... let me just it MLA), KDA (Kkles? No - KDA "Kier-Detected Attention No, it\'s "KDA = kernelized delta attention? ActuallyDA here = gated delta net -gated delta net" - K = KDA (Kan\'s... whatever). The model has hybrid: some layers use KDA (ated delta net, i.e., attention with conv state), other layers MLA (with light'
+--- F-chunk6k (margin 12, chunk 6144 X=1 --census bench/glm-2026-10-09/mi-F.census --vram-lru --vram-pin 0.6) 19:00:58 ---
+slots auto: 11.15 GiB free after the dense half -> 0.00 GiB of expert slots (margin 12.00 GiB)
+census: 11769 (layer, expert) counts from bench/glm-2026-10-09/mi-F.census
+tier: gpu, 0 resident slots, arena 60.1 GiB (9072 experts), file tier 0; load 107.6 s
+prefill: 12736 tokens in 30.58 s = 416.46 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 14.64 s = 17.42 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.7%, pcie 23.0%, file tier 604, skipped 256.5/token
+tier moves: vram_lru swaps 0.00/pass (demoted 0), arena swaps 604 (admit rejects 0), file reads 4.75 ms/pass, file-tier skipped 5485
+  exit 0, VRAM peak 21014 MiB
+  text [225 ids]: 'Let me carefully explain the code and find the parts.\n\nThe user wants an explanation the processing flow, a prompt in, and a detailed point pointing out concrete bug risk or inefficiency"Explain how a prompt is in chunks here" — this refers being processed in chunks. In the step of the entire conversation, the might not have any text, so need to be sure to fix the.\n\nThe response should be clear and.\n\nLet\'s begin with the summary the first part: the assistant is how a prompt is processed in chunks what state is kept between chunks, how the KV and indexer are usedThe assistant\'s response should '
+=== maya-improve done 19:03:37 ===

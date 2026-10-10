@@ -773,14 +773,30 @@ void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs
         run_phase(5, mtasks_);
         const auto b = std::chrono::steady_clock::now();
         for (int e = 0; e < nb; ++e)
-            for (int t = 0; t < mjobs_[e].nt; ++t)
+            for (int t = 0; t < mjobs_[e].nt; ++t) {
+                if (mjobs_[e].lora_a) {   // the LoRA's a . h on the float SwiGLU row, before it is quantized
+                    const float* hh = split_multi_[(size_t) e].ff[t];
+                    const float* la = mjobs_[e].lora_a;
+                    float s = 0.f;
+                    for (int64_t i = 0; i < f.n_ff; ++i) s += la[i] * hh[i];
+                    mjobs_[e].lora_s[t] = s;
+                }
                 if (q2_native_kernels(f.d_type)) act_quant_any(split_multi_[(size_t) e].ff[t], (int) f.n_ff, split_multi_[(size_t) e].a2[t]);
                 else native_quant_h(f, split_multi_[(size_t) e].ff[t], split_multi_[(size_t) e].hq[t]);
+            }
         const auto c = std::chrono::steady_clock::now();
         mper_ = f.n_embd;
         mrows_ = (int64_t) nb * f.n_embd;
         mtasks_ = phase_tasks(mrows_);
         run_phase(6, mtasks_);
+        for (int e = 0; e < nb; ++e)   // the LoRA's down delta, after the down product wrote `out`
+            if (mjobs_[e].lora_a && mjobs_[e].lora_b)
+                for (int t = 0; t < mjobs_[e].nt; ++t) {
+                    float* o = mjobs_[e].out[t];
+                    const float s = mjobs_[e].lora_s[t];
+                    const float* lb = mjobs_[e].lora_b;
+                    if (o) for (int64_t j = 0; j < f.n_embd; ++j) o[j] += s * lb[j];
+                }
         const auto d = std::chrono::steady_clock::now();
         ms_multi_gu += std::chrono::duration<double, std::milli>(b - a).count();
         ms_multi_q += std::chrono::duration<double, std::milli>(c - b).count();

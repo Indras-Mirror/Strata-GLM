@@ -131,6 +131,10 @@ public:
     /// segment only when `want_bytes` covers the arena).  Stops at the first segment the driver cannot back (false,
     /// `err`: what was mapped by then stays).  The new slots are empty until the caller fills them.
     bool grow(int64_t want_bytes, std::string& err);
+    /// Forgets every expert whose slot is >= `first_slot` (they become misses) and rewinds the sequential admission
+    /// to it - what a caller does before `shrink`ing to `first_slot` slots (the per-request elastic cache: the
+    /// prompt borrows the tail's VRAM, `grow` + re-admission give it back for decode).  Returns how many it forgot.
+    int64_t evict_from(int64_t first_slot);
     /// The number of leading slots that fit wholly inside the first `bytes` bytes.
     int64_t slots_within(int64_t bytes) const;
     /// The bytes the first `n` slots span.

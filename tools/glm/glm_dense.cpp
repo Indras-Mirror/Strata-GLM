@@ -160,7 +160,7 @@ bool skip_weight(const std::string & n, bool cpu, bool skip_experts, int64_t n_l
 }
 
 bool load_weights(const GgufModel & model, ggml_backend_t backend, WStore & w, bool skip_experts, int64_t n_layer,
-                  std::string & err) {
+                  std::string & err, int dense_requant = -1) {
     ggml_init_params ip = { /*mem_size*/ 256ull * 1024 * 1024, /*mem_buffer*/ nullptr, /*no_alloc*/ true };
     w.ctx = ggml_init(ip);
     if (!w.ctx) { err = "ggml_init(weights) failed"; return false; }
@@ -201,6 +201,8 @@ bool load_weights(const GgufModel & model, ggml_backend_t backend, WStore & w, b
             for (size_t d = 0; d < ti.shape.size() && d < GGML_MAX_DIMS; ++d) ne[d] = (int64_t) ti.shape[d];
             ggml_type ty = (ggml_type) ti.type;
             if (ty == GGML_TYPE_BF16 && ti.shape.size() >= 2 && ne[0] % 32 == 0) ty = GGML_TYPE_Q8_0;
+            if (dense_requant >= 0 && ty == GGML_TYPE_Q6_K && ti.shape.size() >= 2 && ne[0] % 256 == 0)
+                ty = (ggml_type) dense_requant;   // --dense-requant (e.g. Q4_K: Maya-S-v2 -> Maya-S24's dense)
             ggml_tensor * t = ggml_new_tensor(w.ctx, ty, (int) ti.shape.size(), ne);
             ggml_set_name(t, ti.name.c_str());
             w.t[ti.name] = t;
@@ -770,7 +772,7 @@ bool GlmDense::init(const std::string & model_path, const GlmDenseConfig & cfg, 
     if (im.model->size() == 0) { err = "cannot open " + model_path; return false; }
     if (!(err = read_geometry(im.model->shard(0), im.g)).empty()) return false;
     const GlmGeometry & g = im.g;
-    if (!load_weights(*im.model, im.backend, im.w, cfg.skip_routed_experts, g.n_layer, err)) return false;
+    if (!load_weights(*im.model, im.backend, im.w, cfg.skip_routed_experts, g.n_layer, err, cfg.dense_requant)) return false;
     {
         size_t sh = 0;
         const TensorInfo * te = im.model->find("token_embd.weight", &sh);
@@ -792,7 +794,7 @@ bool GlmDense::init(const std::string & model_path, const GlmDenseConfig & cfg, 
     im.NNEW = std::max<int64_t>(1, cfg.max_tokens) / im.KP + 1;
     // the dense attention mask is only needed while the whole context fits the indexer's selection
     im.MCAP = im.allow_long ? im.CAPMAX : std::min<int64_t>(im.CAPMAX, std::max<int64_t>(im.cpu ? 16 : 256, g.idx_top_k));
-    if (im.NT > 4096) { err = "max_tokens > 4096"; return false; }
+    if (im.NT > 8192) { err = "max_tokens > 8192"; return false; }   // 8192: helios prefills in 8K chunks
 
     // ---- persistent state
     ggml_init_params ip = { 64ull * 1024 * 1024, nullptr, true };
