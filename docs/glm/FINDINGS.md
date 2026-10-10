@@ -741,3 +741,50 @@ requant, no imatrix) - gate 3 tries q5_k.
   decode token - the mask alone is MCAP x NT F16 = 16-24 MB at NT 4096-6144 (K: attention 15.8 -> 18.4 ms); now each
   input's used prefix only. (2) the dense chunk compute buffer (allo_big) was kept after the prompt -> GlmDense::
   release_big() frees it before grow_cache.
+
+## s27 (2026-10-10 late): DECODE IS HOST-LATENCY-BOUND - 8 syncs/layer x 45 layers. The copy engine is NOT the bottleneck
+Source: `bench/glm-2026-10-09/mi3-decode_{cuda_api,cuda_gpu_kern,cuda_gpu_mem_time}_sum.csv`, an nsys capture of the
+decode loop (old binary, 27.70 s / 255 forward passes / 256 tokens, 9.21 tok/s) - `GLM_PROFILE_DECODE=1`, capture range
+cudaProfilerApi.  **The gate-4 P-nsys arm re-profiles on the current binary; re-read the three CSVs before acting.**
+
+**The GPU is idle ~98% of the token.** Totals from that capture: GPU kernels **584.5 ms** (2.1% of 27.7 s); H2D copy
+engine 6195 ms (22%, 24.3 ms/token ~ 575 MB/token, 126838 ops); CUDA API 9743 ms, of which **cudaStreamSynchronize
+6825 ms (70.1%) over 90826 calls = 356/token** (median 7.2 us, max 4.6 ms).  78356 kernel launches = 307/forward
+pass; 14801 `native_gu_multi_kernel` + 11972 `native_down_multi` + 9250 `lora_down` = 45 layers x ~ (58,47,36)/pass,
+i.e. the kernels ARE the MoE groups.  So the earlier "the copy engine is busy nearly every millisecond" reading (s26)
+is true but not causal: 2.3 ms/token of GPU work and 24 ms/token of async H2D sit inside a 108 ms token.
+
+**The 356 syncs/token are fully accounted for: 8 per layer x 45 layers = 360.**  Per decode layer per token, the
+engine makes FOUR host round trips, each of which is a synchronous ggml call:
+1. `predict(il)` - `ggml_backend_graph_compute` (glm_dense.cpp:1014) + `tensor_get(predict_out)` (:1016)  [2 syncs]
+2. `attn_router_n(il)` - `ggml_backend_graph_compute` (:1131) + **`tensor_get(L.o_span)`** (:1136, the
+   [ffn_norm|ids|wts] readback)  [2 syncs]
+3. `gpu_run` - "layer sync" (ds4_moe.cpp:1654) + `h_parts` D2H + "parts sync" (:1704)  [2 syncs]
+4. `finish_layer_n(il)` - **`tensor_set(routed_sum)`** (glm_dense.cpp:1159) + `ggml_backend_graph_compute` (:1164)
+   [2 syncs]
+`ggml_backend_graph_compute` = compute_async + `ggml_backend_synchronize` (third_party/.../ggml-backend.cpp:455-459);
+`tensor_get`/`tensor_set` sync the stream in ggml-cuda.  So per layer the residual stream leaves the device and comes
+back TWICE (the ffn_norm activation, and the routed sum), and the host blocks 8 times.
+
+**Consequence - the expert-time decomposition is serial, not overlapped.** The tier wall for a layer (~20.6 ms/token)
+equals gpu hits (6.19) + pcie (3.86) + cpu pool (9.12) - it is a SUM, so the CPU pool does not overlap the GPU.
+Per-expert cost: **CPU pool 0.52 ms vs GPU hit 0.045 ms (11.6x)**; misses are ~28/token of 360 lookups (17.6 cpu +
+10.4 pcie); the other 181/token are already dropped by skip/rename.  Moving pool work to the card cannot fix this by
+itself - PCIe costs 0.37 ms/expert and is just as serial.
+
+**Therefore the decode roadmap is de-synchronisation, not tier tuning.  Target: 2 syncs/layer, not 8.**
+- (a) **GPU-side MoE weighted sum** over `gp.d_parts` (+ the pool's `im.parts` H2D'd, ~4 experts/layer): removes the
+  131 KB `h_parts` D2H, the "parts sync", the host sum loop (ds4_moe.cpp:1740-1749) AND `tensor_set(routed_sum)` -
+  the finish graph then consumes the MoE output on-device.  MUST reproduce the double-accumulated sum bitwise.
+- (b) **Keep the residual + activation on-device.** `o_span`'s ffn_norm region IS `gp.d_x`; the D2H is only needed
+  for the pool (`native_quant_act`, host Q8_K) - skip it on layers where nk == 0, and always skip the redundant
+  `d_x` H2D (ds4_moe.cpp:1383).
+- (c) **Fold `predict` into the previous `finish` graph** (same input tensor `x_state`, same weights; predict needs
+  nothing finish(il-1) does not already have) - saves a launch + readback sync per layer.
+- (d) Once (a)-(c) land, layer l+1's attn graph can be issued while the host still decides layer l's experts, i.e.
+  a rolling pipeline - the only way to overlap the 9 ms/token pool.
+- (e) Only then re-measure the CPU/PCIe split: with the pool overlapped, `--pcie auto`'s EMA (`ema_hit` is the hit
+  group's ms, used as if per-expert - inconsistent units, ds4_moe.cpp:1347-1350) should be re-derived.
+
+Cheap, no-numerics-change candidate first: (c), then (b).  Both are checkable by ppl parity (X-* arms) + the nsys
+sync count, NOT by wall time alone.

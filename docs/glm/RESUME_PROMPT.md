@@ -18,7 +18,15 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
 `docs/ds4/ENGINE_DENSE.md`, `docs/ds4/ENGINE_MOE.md`; `git log --oneline -15`.
 
 ## State (2026-10-10 LATE) - **CURRENT: Maya-S-v2 is the model; s26 stack built; gate 4 (final) may be running** (supersedes NIGHT)
-**Everything committed on `glm`, NOT pushed** (latest `dd152eca`). Read FINDINGS s25d + s26 first.
+**PUSHED to Indras-Mirror/Strata-GLM main** (2026-10-10 late, `a864dfad`; earlier local-only notes below are stale).
+Read FINDINGS s25d + s26 + **s27** first.
+
+**DECODE IS HOST-LATENCY-BOUND (FINDINGS s27) - read it before touching decode speed.** nsys: the GPU is busy 2.1% of
+the token (584 ms of kernels in 27.7 s); 70% of all CUDA API time is `cudaStreamSynchronize`, **356 calls/token =
+8 per layer x 45 layers** (predict, attn, the `o_span` readback, the two `gpu_run` syncs, the `routed_sum` upload,
+the finish graph - each a synchronous ggml call).  The per-layer expert wall is the SUM of card+pcie+pool, so the
+9.1 ms/token CPU pool does not overlap anything.  The fix is de-synchronisation (GPU-side MoE sum, keep the residual
+on-device, fold `predict` into the previous finish graph), NOT the copy engine and NOT tier tuning.
 
 **MODEL:** Maya-S-v2 (peasantsmith, FP8-derived i-quants, 3 shards + NextN blk.45) at
 `/media/mal/SSD NVME/Models/GLM-5.3-Flash-Maya-S-v2/` (NTFS NVMe, verified copy; the SATA original on
@@ -48,9 +56,12 @@ buffer kept after prompt (GlmDense::release_big), indexer pools sized by chunk i
 2. Pick flags: q5_k vs none (by X-* ppl), chunk 4096 vs 6144, pf-b. Edit tools/glm/serve/strata-glm-maya-abl-{300k,512k}.json.
 3. Install wrapper: `cp tools/glm/serve/strata-glm-quetza.wrapper ~/.local/bin/strata-glm-quetza` (adds --maya
    port 8143, --maya512 port 8144). Smoke-test via Quetza.
-4. **Decode bottleneck (nsys mi3-decode*.csv):** copy engine ~24 ms/token, 575 MB/token H2D - mostly the expert
-   PREFETCH (60 issued/token, ~45 used). Try --pf-b lower/0; then cut per-layer host syncs (355
-   cudaStreamSynchronize/token, 75 us avg) - keep VRAM-hit layers on the GPU, host only for CPU-pool misses.
+4. **Decode bottleneck - see FINDINGS s27 (this REVERSES the old reading).** Gate 4 answered the prefetch question:
+   `--pf-b 0` is a net LOSS (23.81 vs 24.49 tok/s; experts 20.61 -> 24.55 ms/token against predict+prefetch 2.15).
+   Do NOT tune the copy engine or the tier split: the GPU is busy 2.1% of the token and the per-layer expert wall is
+   card+pcie+pool summed serially. Attack the **8 syncs/layer** (356/token): (c) fold `predict` into the previous
+   finish graph, (b) keep the activation on-device / skip the redundant `d_x` H2D when nk == 0, then (a) move the MoE
+   weighted sum onto the GPU (bitwise-equal double accumulation) so `finish` consumes it on-device. Then (d) pipeline.
 5. Harness bench: ~/AI/quetza-workspace/model-gauntlet/harness-bench (run_bench.py --model glm-maya added; start the
    server with the wrapper's config on port 8143 first).
 6. When done with the GPU: relay to peer `strata-ds4-gpu` (mcp quetza-relay relay_ask) that the GPU is free for its
