@@ -602,6 +602,10 @@ int main(int argc, char ** argv) {
         auto is_stop = [&](int t) { return std::find(a.stop.begin(), a.stop.end(), t) != a.stop.end(); };
         std::vector<int> hist;   // the ids the state has seen, in order
         int snap_len = -1;       // hist's length at the snapshot (the end of the last prompt)
+        if (slot_gib_max > 0) {   // start at the decode size: a short first request (no shrink) must not decode small
+            std::string gerr;
+            if (tier.grow_cache(a.vram_grow_keep, gerr) < 0) std::fprintf(stderr, "serve: grow_cache: %s\n", gerr.c_str());
+        }
         std::printf("INFO ctx=%d experts_vram=%lld arena_experts=%lld\n", ctxv, (long long) tier.resident(),
                     (long long) tier.arena_experts());
         std::printf("READY %d stop\n", ctxv);

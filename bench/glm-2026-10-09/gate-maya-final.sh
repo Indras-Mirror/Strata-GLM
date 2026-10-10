@@ -46,6 +46,7 @@ while ! flock -n "$LOCK" true 2>/dev/null; do sleep 10; done
 # the final stack (s26d): census, pcie auto, MMQ+LoRA prefill, elastic cache (release_big, partial input upload,
 # indexer pools sized by the pass), q5_k dense - at 300K and 512K, chunk 4096 and 6144
 run R300-4k -- "${T[@]}" --dense-requant q5_k --ctx 307200 --prefill-chunk 4096 --vram-margin 7.5 --vram-grow 1.5
+run R300-4k-nopf -- "${T[@]}" --dense-requant q5_k --ctx 307200 --prefill-chunk 4096 --vram-margin 7.5 --vram-grow 1.5 --pf-b 0
 run R300-6k -- "${T[@]}" --dense-requant q5_k --ctx 307200 --prefill-chunk 6144 --vram-margin 10 --vram-grow 1.5
 run R512-4k -- "${T[@]}" --dense-requant q5_k --ctx 524288 --prefill-chunk 4096 --vram-margin 7.5 --vram-grow 1.5
 run R512-6k -- "${T[@]}" --dense-requant q5_k --ctx 524288 --prefill-chunk 6144 --vram-margin 10 --vram-grow 1.5
