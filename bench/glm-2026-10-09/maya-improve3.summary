@@ -1,0 +1,70 @@
+--- M-el4k-q5 ( --temp 0 --ids-file bench/glm-2026-10-09/prompts/chat_code6k.i32 -n 256 --dense-requant q5_k --ctx 307200 --prefill-chunk 4096 --vram-margin 7.5 --vram-grow 1.5) 19:34:10 ---
+slots auto: 12.52 GiB free after the dense half -> 5.02 GiB of expert slots (margin 7.50 GiB)
+tier: gpu, 768 resident slots, arena 55.1 GiB (8310 experts), file tier 0; load 133.1 s
+grow_cache: 768 -> 1489 slots (+721, 0 from the file tier) in 195 ms
+prefill: 12736 tokens in 32.13 s = 396.37 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 10.46 s = 24.38 tok/s
+experts/token: hit 42.4% (prefetched-useful 44.8/token of 60.1 issued), cpu 2.8%, pcie 3.9%, file tier 557, skipped 171.0/token
+decode ms/token: predict+prefetch 2.11, attention+router 18.09, experts 19.00, finish 0.98, head 0.57
+tier ms/token: wall 18.97 (gpu hits 5.39, pcie 4.98, cpu pool 6.08)
+  exit 0, VRAM peak 23230 MiB
+  text [225 ids]: 'Let me analyze this C++ inference engine for hybrid-attention MoE model (M-5-next style, similar DeepSeek MLA + KDA hybrid with hyper-connections and a lightning for sparse attention).\n\nThe user asks Explain how a prompt is processed in here (what each graph does, state is kept between chunks, and the KV cache and the indexer are), then point out one concrete bug or inefficiency.\n\nLet me carefully'
+--- M-el4k-q6 ( --temp 0 --ids-file bench/glm-2026-10-09/prompts/chat_code6k.i32 -n 256 --ctx 307200 --prefill-chunk 4096 --vram-margin 7.5 --vram-grow 1.5) 19:37:11 ---
+slots auto: 11.53 GiB free after the dense half -> 4.03 GiB of expert slots (margin 7.50 GiB)
+tier: gpu, 617 resident slots, arena 56.1 GiB (8460 experts), file tier 0; load 82.4 s
+grow_cache: 617 -> 1336 slots (+719, 0 from the file tier) in 195 ms
+prefill: 12736 tokens in 32.44 s = 392.64 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 10.63 s = 23.99 tok/s
+experts/token: hit 42.0% (prefetched-useful 45.3/token of 60.1 issued), cpu 2.7%, pcie 4.1%, file tier 539, skipped 171.8/token
+decode ms/token: predict+prefetch 2.13, attention+router 18.74, experts 18.87, finish 1.02, head 0.65
+tier ms/token: wall 18.85 (gpu hits 5.40, pcie 5.16, cpu pool 5.93)
+  exit 0, VRAM peak 23224 MiB
+  text [225 ids]: 'Let me digest the code carefully. This is C++ inference engine for a "brid-attention MoE model" GLM-like architecture (GLM5-next?) with:\n\n- MLAmulti-layer attention with low-rankization, like DeepSeek MLA) some layers, KDA (kernel attention? gated delta net — "ated_delta_net" with conv state for other layers — hybrid attention.\n Hyper-connections (hc) —_pre, hc_post with hc* streams.\n- MoE routing'
+--- N-el6k-q5 ( --temp 0 --ids-file bench/glm-2026-10-09/prompts/chat_code6k.i32 -n 256 --dense-requant q5_k --ctx 307200 --prefill-chunk 6144 --vram-margin 10 --vram-grow 1.5) 19:39:22 ---
+slots auto: 12.14 GiB free after the dense half -> 2.14 GiB of expert slots (margin 10.00 GiB)
+tier: gpu, 332 resident slots, arena 58.0 GiB (8747 experts), file tier 0; load 139.9 s
+grow_cache: 332 -> 1422 slots (+1090, 0 from the file tier) in 295 ms
+prefill: 12736 tokens in 29.42 s = 432.83 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 10.24 s = 24.91 tok/s
+experts/token: hit 46.3% (prefetched-useful 43.8/token of 60.1 issued), cpu 3.6%, pcie 2.5%, file tier 522, skipped 160.1/token
+decode ms/token: predict+prefetch 2.13, attention+router 18.36, experts 17.84, finish 0.99, head 0.56
+tier ms/token: wall 17.81 (gpu hits 5.74, pcie 3.25, cpu pool 6.64)
+  exit 0, VRAM peak 22954 MiB
+  text [225 ids]: 'Let me analyze this C++ inference engine for hybrid-attention MoE model (M-5-next style, similar DeepSeek/GPT architecture with MLA KDA hybrid attention, hyper-, lightning indexer for sparse attention selectionLet me trace through the code carefully**Overview of the architecture:**\n\n model is a hybrid-attention Mo model:\n- Some layers use K (Kimi Delta Attention / gated net style with conv + gated'
+--- O-el4k-512k ( --temp 0 --ids-file bench/glm-2026-10-09/prompts/chat_code6k.i32 -n 256 --dense-requant q5_k --ctx 524288 --prefill-chunk 4096 --vram-margin 7.5 --vram-grow 1.5) 19:42:26 ---
+slots auto: 10.10 GiB free after the dense half -> 2.60 GiB of expert slots (margin 7.50 GiB)
+tier: gpu, 399 resident slots, arena 57.5 GiB (8677 experts), file tier 0; load 138.6 s
+grow_cache: 399 -> 1120 slots (+721, 0 from the file tier) in 195 ms
+prefill: 12736 tokens in 32.71 s = 389.36 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 10.30 s = 24.77 tok/s
+experts/token: hit 40.5% (prefetched-useful 46.5/token of 60.1 issued), cpu 4.1%, pcie 2.9%, file tier 542, skipped 176.2/token
+decode ms/token: predict+prefetch 2.13, attention+router 17.64, experts 18.81, finish 0.99, head 0.56
+tier ms/token: wall 18.79 (gpu hits 5.63, pcie 3.81, cpu pool 7.48)
+  exit 0, VRAM peak 23220 MiB
+  text [225 ids]: 'Let me analyze this C++ inference engine code. This is a hybrid-attentionE model (GLM-5 style, based on the comments —glm5-next.cpp" appears in, MLA + KDA hybrid attention hyper-connections, lightning indexer for attention selection).\n\nLet me trace through code to understand the architecture:\n\n** overview (from the code):**\n The model has layers that are eitherDA (kernelized delta attention / delt'
+--- Q-q5d-chat ( --ctx 4096 --prefill-chunk 1024 --vram-margin 5.5 -n 1 --ppl --ids-file bench/glm-2026-10-09/prompts/eval_chat.i32 --dense-requant q5_k) 19:45:33 ---
+slots auto: 16.48 GiB free after the dense half -> 10.98 GiB of expert slots (margin 5.50 GiB)
+tier: gpu, 1667 resident slots, arena 49.1 GiB (7405 experts), file tier 0; load 108.7 s
+ppl: 1999 positions, mean NLL 1.74625, perplexity 5.7331
+prefill: 2000 tokens in 12.22 s = 163.63 tok/s (chunked)
+decode : 1 tokens, 1 forward passes in 0.00 s = 9591.41 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+tier ms/token: wall 0.00 (gpu hits 0.00, pcie 0.00, cpu pool 0.00)
+  exit 0, VRAM peak 22868 MiB
+--- Q-q5d-code ( --ctx 4096 --prefill-chunk 1024 --vram-margin 5.5 -n 1 --ppl --ids-file bench/glm-2026-10-09/prompts/eval_code.i32 --dense-requant q5_k) 19:47:37 ---
+slots auto: 16.48 GiB free after the dense half -> 10.98 GiB of expert slots (margin 5.50 GiB)
+tier: gpu, 1667 resident slots, arena 49.1 GiB (7405 experts), file tier 0; load 106.6 s
+ppl: 1999 positions, mean NLL 1.29679, perplexity 3.6575
+prefill: 2000 tokens in 11.24 s = 177.96 tok/s (chunked)
+decode : 1 tokens, 1 forward passes in 0.00 s = 9755.05 tok/s
+experts/token: hit 0.0% (prefetched-useful 0.0/token of 0.0 issued), cpu 0.0%, pcie 0.0%, file tier 0, skipped 0.0/token
+decode ms/token: predict+prefetch 0.00, attention+router 0.00, experts 0.00, finish 0.00, head 0.00
+tier ms/token: wall 0.00 (gpu hits 0.00, pcie 0.00, cpu pool 0.00)
+  exit 0, VRAM peak 22868 MiB
+--- P-nsys 19:49:38 ---
+  nsys exit 0
+bench/glm-2026-10-09/mi3-decode_cuda_api_sum.csv
+bench/glm-2026-10-09/mi3-decode_cuda_gpu_kern_sum.csv
+bench/glm-2026-10-09/mi3-decode_cuda_gpu_mem_time_sum.csv
+=== maya-improve3 done 19:52:51 ===

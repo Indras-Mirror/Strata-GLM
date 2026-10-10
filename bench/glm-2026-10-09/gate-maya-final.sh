@@ -50,6 +50,12 @@ run R300-4k-nopf -- "${T[@]}" --dense-requant q5_k --ctx 307200 --prefill-chunk 
 run R300-6k -- "${T[@]}" --dense-requant q5_k --ctx 307200 --prefill-chunk 6144 --vram-margin 10 --vram-grow 1.5
 run R512-4k -- "${T[@]}" --dense-requant q5_k --ctx 524288 --prefill-chunk 4096 --vram-margin 7.5 --vram-grow 1.5
 run R512-6k -- "${T[@]}" --dense-requant q5_k --ctx 524288 --prefill-chunk 6144 --vram-margin 10 --vram-grow 1.5
+# requant quality with EXACT math: no skips (skip-file-prefill drops a different expert set whenever the dense size
+# moves the arena, which confounded gate 2-3's ppl: q4 5.61 < q5 5.73).  The COMMON skips are overridden to 0.
+EX=(--ctx 4096 --prefill-chunk 1024 --vram-margin 5.5 -n 1 --ppl --skip-miss 0 --skip-file 0 --skip-file-prefill 0 --ids-file $D/prompts/eval_chat.i32)
+run X-q6-chat -- "${EX[@]}"
+run X-q5-chat -- "${EX[@]}" --dense-requant q5_k
+run X-q4-chat -- "${EX[@]}" --dense-requant q4_k
 # the decode profile: nsys captures only the decode loop (GLM_PROFILE_DECODE -> cudaProfilerStart/Stop)
 echo "--- P-nsys $(date +%T) ---" | tee -a $S
 cp $CEN0 $D/fin-P.census
