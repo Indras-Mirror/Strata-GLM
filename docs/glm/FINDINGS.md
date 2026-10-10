@@ -825,3 +825,35 @@ Maya+LoRA, census, pcie auto, elastic cache, chunk 12736-token chat prompt -> 25
 - nsys decode profile (gate 3, mi3-decode*.csv): host->device copies ~24 ms/token of copy-engine time, ~575 MB/token
   (prefetch ~60 experts/token issued, ~45 used + PCIe misses); 355 cudaStreamSynchronize/token (75 us avg) -> the
   next decode lever is fewer per-layer host syncs (GPU-resident routing for VRAM-hit layers), not more bandwidth.
+
+### s26 gate 4 raw summary (auto-appended 2026-10-10 20:08:14)
+```
+--- R300-4k ( --temp 0 --ids-file bench/glm-2026-10-09/prompts/chat_code6k.i32 -n 256 --dense-requant q5_k --ctx 307200 --prefill-chunk 4096 --vram-margin 7.5 --vram-grow 1.5) 19:53:11 ---
+grow_cache: 749 -> 1470 slots (+721, 0 from the file tier) in 195 ms
+prefill: 12736 tokens in 32.77 s = 388.63 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 10.41 s = 24.49 tok/s
+  exit 0, VRAM peak 23539 MiB
+--- R300-4k-nopf ( --temp 0 --ids-file bench/glm-2026-10-09/prompts/chat_code6k.i32 -n 256 --dense-requant q5_k --ctx 307200 --prefill-chunk 4096 --vram-margin 7.5 --vram-grow 1.5 --pf-b 0) 19:56:04 -
+grow_cache: 749 -> 1479 slots (+730, 0 from the file tier) in 198 ms
+prefill: 12736 tokens in 32.56 s = 391.13 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 10.71 s = 23.81 tok/s
+  exit 0, VRAM peak 23177 MiB
+--- R300-6k ( --temp 0 --ids-file bench/glm-2026-10-09/prompts/chat_code6k.i32 -n 256 --dense-requant q5_k --ctx 307200 --prefill-chunk 6144 --vram-margin 10 --vram-grow 1.5) 19:58:59 ---
+grow_cache: 313 -> 1403 slots (+1090, 0 from the file tier) in 295 ms
+prefill: 12736 tokens in 29.66 s = 429.35 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 10.46 s = 24.38 tok/s
+  exit 0, VRAM peak 23548 MiB
+--- R512-4k ( --temp 0 --ids-file bench/glm-2026-10-09/prompts/chat_code6k.i32 -n 256 --dense-requant q5_k --ctx 524288 --prefill-chunk 4096 --vram-margin 7.5 --vram-grow 1.5) 20:02:02 ---
+grow_cache: 379 -> 1101 slots (+722, 0 from the file tier) in 195 ms
+prefill: 12736 tokens in 33.22 s = 383.33 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 10.39 s = 24.55 tok/s
+  exit 0, VRAM peak 23218 MiB
+--- R512-6k ( --temp 0 --ids-file bench/glm-2026-10-09/prompts/chat_code6k.i32 -n 256 --dense-requant q5_k --ctx 524288 --prefill-chunk 6144 --vram-margin 10 --vram-grow 1.5) 20:05:08 ---
+prefill: 12736 tokens in 29.74 s = 428.26 tok/s (chunked)
+decode : 256 tokens, 255 forward passes in 12.41 s = 20.55 tok/s
+  exit 0, VRAM peak 22604 MiB
+--- X-q6-chat ( --ctx 4096 --prefill-chunk 1024 --vram-margin 5.5 -n 1 --ppl --skip-miss 0 --skip-file 0 --skip-file-prefill 0 --ids-file bench/glm-2026-10-09/prompts/eval_chat.i32) 20:08:07 ---
+(gate stopped after R512-6k so Mal can test the wrapper; X-* exact ppl + nsys arms not run)
+=== maya-final done 20:08:14 ===
+```
+- **512K + chunk 6144 is a trap**: margin 10 exceeds the VRAM free after the dense half at 512K, so the elastic cache never engages (no grow_cache) and decode runs with no VRAM experts (20.55 tok/s). The 512K serve config uses chunk 4096 / margin 7.5 (24.55 tok/s, prefill ~389). 6K chunks are for 300K only.
