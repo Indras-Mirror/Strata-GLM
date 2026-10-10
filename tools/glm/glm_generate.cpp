@@ -421,6 +421,20 @@ int main(int argc, char ** argv) {
                     const double cy = census[(size_t) (y.first * G.n_expert + y.second)] / (double) tier.blob_bytes(y.first);
                     return cx > cy;
                 });
+            // soft pruning (s28): a pruned expert the router still picks is read from NVMe (~2 ms, 4 ms/token measured).
+            // The arena budget the kept set leaves (72 GiB budget vs ~58 GiB kept) takes the most-used pruned experts,
+            // census-ranked, after every kept one - the VRAM seed's head is unchanged.
+            if (n_pruned > 0 && a.prune_penalty > 0 && census_n > 0 && !std::getenv("GLM_NO_PRUNED_ARENA")) {
+                std::vector<std::pair<int32_t, int32_t>> pr;
+                for (int64_t l : lorder)
+                    for (int64_t e = 0; e < TG.n_experts; ++e)
+                        if (is_pruned(l, e) && census[(size_t) (l * G.n_expert + e)] > 0) pr.emplace_back((int32_t) l, (int32_t) e);
+                std::stable_sort(pr.begin(), pr.end(), [&](const auto & x, const auto & y) {
+                    return census[(size_t) (x.first * G.n_expert + x.second)] > census[(size_t) (y.first * G.n_expert + y.second)];
+                });
+                std::fprintf(stderr, "arena: %zu soft-pruned experts with census uses ranked after the kept set\n", pr.size());
+                ranked.insert(ranked.end(), pr.begin(), pr.end());
+            }
             ok = tier.seed_from_ranked(ranked, err);
         }
         if (!ok) { std::fprintf(stderr, "glm_generate: seed: %s\n", err.c_str()); return 1; }
