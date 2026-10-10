@@ -678,3 +678,12 @@ land, so the engine answers in ~seconds and slots become hits as they fill. Comp
 **not yet GPU-tested**. Also: our `--vram-margin 5.5` (code default 1.0) and the 512K KV (~6 GiB) keep expert
 slots at 731/5.63 GiB vs PolyStrata's 1413/10.9 GiB on the same card - the ctx/margin sweep (32K/300K @ 1.5) runs
 after this.
+
+## s25c: the residency sweep - the VRAM cache can 2.7x, but the margin must leave SCRATCH room
+`--ctx 524288 --vram-margin 5.5` -> 5.67 GiB slots / 731 experts (the served config today).
+`--ctx 32768 --vram-margin 1.5` -> **15.07 GiB slots / 1959 experts (2.7x)**, but the run then DIES:
+`ds4_moe: c_parts: out of memory` - the chunk-path scratch needs VRAM, so a 1.5 GiB margin is too small.
+`--ctx 300000 --vram-margin 1.5` -> 8.69 GiB slots (the 300K KV costs ~6.4 GiB more than 32K's).
+=> the safe operating point is **~32-64K ctx at margin ~3-4 GiB**: most of the 2.7x, with scratch room. The 512K KV
+(~6 GiB) buys long context at the cost of ~half the VRAM expert cache; use it only when a long prompt needs it.
+Sweep: `bench/glm-2026-10-09/vram-margin.summary`.

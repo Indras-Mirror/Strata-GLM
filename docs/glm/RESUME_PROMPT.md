@@ -17,7 +17,43 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
 `docs/glm/FINDINGS.md`; then the DS4 docs we build on: `docs/ds4/RESUME_PROMPT.md` (rules, gates, lessons),
 `docs/ds4/ENGINE_DENSE.md`, `docs/ds4/ENGINE_MOE.md`; `git log --oneline -15`.
 
-## State (2026-10-10 PM) - **CURRENT: abliteration-fast is close; BAKE REJECTED; the X(12) gap found** (supersedes the merge block below)
+## State (2026-10-10 NIGHT) - **CURRENT: ablated server 3x; the residency lever found (margin must leave scratch room); spec block fetched but does NOT pay** (supersedes the PM block below)
+**Everything committed on `glm`, NOT pushed** (12 commits; latest `9e423502`).
+
+**MEASURED TODAY (all real runs):**
+- **Ablated decode 3x**: skip 0 = 5.44 t/s -> skip 0.15 + `--renorm-skip` = **16.27 t/s**. That IS
+  `strata-glm-quetza --full` / `tools/glm/serve/strata-glm-unc-ablated.json`. (FINDINGS s25.)
+- **Residency lever**: `--ctx 524288 --vram-margin 5.5` -> 5.67 GiB expert slots / **731 experts**; `--ctx 32768
+  --vram-margin 1.5` -> 15.07 GiB / **1959 experts (2.7x)**. The 512K KV (~6 GiB) + the 5.5 GiB margin are ~11.5 GiB
+  that is not experts. **BUT margin 1.5 is TOO LOW -> `ds4_moe: c_parts: out of memory` at decode** (the prefill
+  scratch needs VRAM). Use ~3-4 GiB. `--ctx 300000 --vram-margin 1.5` -> 8.69 GiB slots. Sweep:
+  `bench/glm-2026-10-09/vram-margin.summary`.
+- **The PolyStrata draft block does NOT pay on our box**: built their engine with CUDA (`~/AI/PolyStrata`) and ran
+  OUR file + the fetched block -> 5.05 t/s no-draft, **5.17 with the block (+2%)**, 85% accepted (accurate, starved).
+  Our own engine does 16-20 t/s on the same file. **Spec pays IFF experts are resident** -> the residency lever.
+- **Load slowness is RAM/page-cache thrash**, NOT the disk (dd = 2.5 GB/s) or heat (55 C): the concurrent Maya
+  download evicts the model's warm pages (MemAvailable 80 -> 19 GiB). `--arena-lazy` sidesteps it.
+
+**ARTIFACTS:**
+- `draft-block.gguf` (2.79 GB, 29 tensors, SHA256 verified) in `/media/mal/NVME1TB/Models/GLM-5.3-Flash-RCO/` - GLM's
+  NextN block, model-independent ("one serves every size"); fetched with PolyStrata's `glm_draft_fetch.py` (copy in
+  `/tmp/polystrata-mtp/`).
+- `~/AI/PolyStrata` built (`build/strata-poly`, CUDA), tokenizer (`glm-tokenizer/`), `glm.profile`.
+- **Maya-S-v2 downloading** to `/media/Crucial1TB/models/GLM-5.3-Flash-Maya-S-v2` (96.5 GB, ~60 GB at NIGHT).
+- New docs: `docs/glm/{PEERS,SPEC_DRAFT,FAST_START}.md`; `tools/glm/mtp_probe.py`, `--arena-lazy`.
+
+**NEXT (in order):**
+1. **Maya-S-v2** (Mal wants it): needs `IQ2_S(22)` + `IQ3_XXS(18)` added to `STRATA_D_FMTS_FORK` (its gate/up IQ2_XXS
+   and Q6_K dense are already supported) + sharded loading + ignore `blk.45`. Then apply our LoRA. **CAVEAT: i-quant
+   experts decode SLOWER on the CPU** (PolyStrata's own note) - it may be a QUALITY play, not a speed one.
+2. **Serving config**: set the ablated config to `--ctx 32768` (or 300K) + `--vram-margin 3.5` -> ~2.5x resident;
+   A/B the decode. (Fix the margin-1.5 OOM.)
+3. **Test `--arena-lazy`** (armed; `bench/glm-2026-10-09/lazy-arena.log`) -> if it answers in ~10 s, put it in the
+   serve configs.
+4. **Then** re-test the draft block at high residency; port the GLM NextN forward + the `Controller` only if it pays
+   (`SPEC_DRAFT.md` steps B-C).
+
+## State (2026-10-10 PM) - **abliteration-fast is close; BAKE REJECTED; the X(12) gap found** (superseded by the block above)
 **UNCOMMITTED in `~/AI/Strata-GLM` (branch `glm`) - nothing pushed.** Three changes live in the working tree:
 1. `src/kernels/cuda/iq_kernels.cu:736` - added `X(12)` to `STRATA_D_FMTS_FORK` (Q4_K down_exps, layers 3-5). WITHOUT
    this the merged build cannot load the model (`tier init: native_expert_grouped has no kernel for layer 3's 12/12/12`).
