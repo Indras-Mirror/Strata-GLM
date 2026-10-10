@@ -31,6 +31,8 @@
   "--skip-file-prefill",
   "0.15",
   "--renorm-skip",
+  "--pf-b",
+  "1.0",
   "--pcie",
   "auto",
   "--dense-requant",
