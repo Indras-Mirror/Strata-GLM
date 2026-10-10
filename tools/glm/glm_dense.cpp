@@ -944,6 +944,7 @@ bool GlmDense::init(const std::string & model_path, const GlmDenseConfig & cfg, 
 
 void GlmDense::reset() {
     Impl & im = *p_;
+    ggml_backend_synchronize(im.backend);
     ggml_backend_buffer_clear(im.sbuf, 0);
     im.next_pos = 0;
     im.in_pos = -1;
@@ -965,6 +966,7 @@ bool GlmDense::snapshot() {
         im.snap_buf = ggml_backend_alloc_ctx_tensors_from_buft(im.snap_ctx, ggml_backend_get_default_buffer_type(im.backend));
         if (!im.snap_buf) { im.err = "snapshot: cannot allocate the state copy"; return false; }
     }
+    ggml_backend_synchronize(im.backend);
     for (auto & pr : im.snap_pairs) ggml_backend_tensor_copy(pr.first, pr.second);
     ggml_backend_synchronize(im.backend);
     im.snap_pos = im.next_pos;
@@ -974,6 +976,7 @@ bool GlmDense::snapshot() {
 bool GlmDense::restore() {
     Impl & im = *p_;
     if (im.snap_pos < 0) { im.err = "restore: no snapshot"; return false; }
+    ggml_backend_synchronize(im.backend);
     for (auto & pr : im.snap_pairs) ggml_backend_tensor_copy(pr.second, pr.first);
     ggml_backend_synchronize(im.backend);
     im.next_pos = im.snap_pos;
@@ -996,8 +999,9 @@ bool GlmDense::begin_tokens(const int * tids, int n) {
         if (im.embd_type == GGML_TYPE_F32) std::memcpy(dst, row, (size_t) im.D * 4);
         else ggml_get_type_traits((ggml_type) im.embd_type)->to_float(row, dst, im.D);
     }
-    ggml_backend_tensor_set(im.i_emb, im.host_emb.data(), 0, im.host_emb.size() * 4);
-    if (ggml_backend_graph_compute(im.backend, im.gf_init[(size_t) n]) != GGML_STATUS_SUCCESS) {
+    ggml_backend_synchronize(im.backend);   // host_emb's previous upload / the previous token's work
+    ggml_backend_tensor_set_async(im.backend, im.i_emb, im.host_emb.data(), 0, im.host_emb.size() * 4);
+    if (ggml_backend_graph_compute_async(im.backend, im.gf_init[(size_t) n]) != GGML_STATUS_SUCCESS) {
         im.err = "init graph compute failed";
         return false;
     }
@@ -1011,9 +1015,10 @@ bool GlmDense::predict(int il, int * top_ids, int n_top) {
     for (int i = 0; i < n_top; ++i) top_ids[i] = -1;
     if (!L.routed) return false;
     if (!im.alloc(L.allo_predict, L.gf_predict)) { im.err = "gallocr(predict) failed"; return false; }
-    if (ggml_backend_graph_compute(im.backend, L.gf_predict) != GGML_STATUS_SUCCESS) { im.err = "predict compute failed"; return false; }
+    if (ggml_backend_graph_compute_async(im.backend, L.gf_predict) != GGML_STATUS_SUCCESS) { im.err = "predict compute failed"; return false; }
     std::vector<float> sel((size_t) ggml_nelements(L.predict_out));
-    ggml_backend_tensor_get(L.predict_out, sel.data(), 0, sel.size() * 4);
+    ggml_backend_tensor_get_async(im.backend, L.predict_out, sel.data(), 0, sel.size() * 4);
+    ggml_backend_synchronize(im.backend);
     std::vector<int> idx(sel.size());
     for (size_t i = 0; i < sel.size(); ++i) idx[i] = (int) i;
     const int k = std::min<int>(n_top, (int) sel.size());
@@ -1123,6 +1128,7 @@ bool GlmDense::attn_router_n(int il, int pos0, int n, int * routed_ids, float * 
         }
         // upload what this pass reads, not the whole span: the span is sized for the largest chunk (the mask alone is
         // MCAP x NT F16 = 16 MB at NT 4096) and a decode step used to send all of it every token (s26: +2.7 ms/token)
+        ggml_backend_synchronize(im.backend);   // put() is a plain (cudaStreamPerThread) upload
         auto put = [&](ggml_tensor * t, size_t bytes) {
             const size_t off = (size_t) ((uint8_t *) t->data - im.in_base);
             ggml_backend_tensor_set(im.i_span, im.in_host.data() + off, off, std::min(bytes, ggml_nbytes(t)));
@@ -1139,12 +1145,13 @@ bool GlmDense::attn_router_n(int il, int pos0, int n, int * routed_ids, float * 
         }
         im.in_pos = pos0; im.in_n = n; im.in_cap = mcap; im.in_dirty = false;
     }
-    if (ggml_backend_graph_compute(im.backend, var->gf) != GGML_STATUS_SUCCESS) { im.err = "attn graph compute failed"; return false; }
+    if (ggml_backend_graph_compute_async(im.backend, var->gf) != GGML_STATUS_SUCCESS) { im.err = "attn graph compute failed"; return false; }
     if (il == (int) im.ly.size() - 1) im.next_pos = pos0 + n;
 
     // one readback: n blocks [fn | ids | wts]
     const size_t ob = (size_t) im.o_blk;
-    ggml_backend_tensor_get(L.o_span, im.host_out.data(), 0, ob * (size_t) n);
+    ggml_backend_tensor_get_async(im.backend, L.o_span, im.host_out.data(), 0, ob * (size_t) n);
+    ggml_backend_synchronize(im.backend);
     for (int t = 0; t < n; ++t) {
         const uint8_t * blk = im.host_out.data() + (size_t) t * ob;
         std::memcpy(im.host_fn.data() + (size_t) t * im.D, blk, (size_t) im.D * 4);
@@ -1167,12 +1174,13 @@ bool GlmDense::finish_layer_n(int il, int n, const float * routed_sum) {
     Impl::Layer & L = im.ly[(size_t) il];
     if (L.routed) {
         if (!routed_sum) { im.err = "finish_layer: routed sum missing"; return false; }
-        ggml_backend_tensor_set(im.routed_sum, routed_sum, 0, (size_t) (im.D * n) * 4);
+        ggml_backend_tensor_set_async(im.backend, im.routed_sum, routed_sum, 0, (size_t) (im.D * n) * 4);
     }
     if (!im.ensure_n(n)) return false;
     if (!L.allo_finish[(size_t) n]) L.allo_finish[(size_t) n] = im.allo_for(n);   // after release_big
     if (!im.alloc(L.allo_finish[(size_t) n], L.gf_finish[(size_t) n])) { im.err = "gallocr(finish) failed"; return false; }
-    if (ggml_backend_graph_compute(im.backend, L.gf_finish[(size_t) n]) != GGML_STATUS_SUCCESS) { im.err = "finish compute failed"; return false; }
+    if (ggml_backend_graph_compute_async(im.backend, L.gf_finish[(size_t) n]) != GGML_STATUS_SUCCESS) { im.err = "finish compute failed"; return false; }
+    if (im.gate_taps) ggml_backend_synchronize(im.backend);
     if (im.gate_taps)
         ggml_backend_tensor_get(L.t_lout, L.host_lout.data(), (size_t) (n - 1) * L.t_lout->nb[2], L.host_lout.size() * 4);
     return true;
@@ -1201,6 +1209,7 @@ bool GlmDense::logits_rows(int r0, int nr, float * out) {
         im.rows_t[(size_t) nr] = lg;
     }
     const size_t slab = im.x_state->nb[2];
+    ggml_backend_synchronize(im.backend);   // the async finish graphs wrote x_state
     im.host_x.resize(slab * (size_t) nr);
     ggml_backend_tensor_get(im.x_state, im.host_x.data(), slab * (size_t) r0, slab * (size_t) nr);
     ggml_backend_tensor_set(im.hx, im.host_x.data(), 0, slab * (size_t) nr);
@@ -1215,8 +1224,9 @@ bool GlmDense::logits_n(int n, const float ** out, int * n_vocab) {
     if (!im.ensure_n(n)) return false;
     if (!im.gf_head[(size_t) n]) { im.err = "logits_n: n > 4 (prompt chunk): use logits_rows"; return false; }
     if (!im.alloc(im.allo_head[(size_t) n], im.gf_head[(size_t) n])) { im.err = "gallocr(head) failed"; return false; }
-    if (ggml_backend_graph_compute(im.backend, im.gf_head[(size_t) n]) != GGML_STATUS_SUCCESS) { im.err = "head compute failed"; return false; }
-    ggml_backend_tensor_get(im.logits_t[(size_t) n], im.host_logits.data(), 0, (size_t) (im.g.vocab * n) * 4);
+    if (ggml_backend_graph_compute_async(im.backend, im.gf_head[(size_t) n]) != GGML_STATUS_SUCCESS) { im.err = "head compute failed"; return false; }
+    ggml_backend_tensor_get_async(im.backend, im.logits_t[(size_t) n], im.host_logits.data(), 0, (size_t) (im.g.vocab * n) * 4);
+    ggml_backend_synchronize(im.backend);
     *out = im.host_logits.data();
     *n_vocab = (int) im.g.vocab;
     return true;

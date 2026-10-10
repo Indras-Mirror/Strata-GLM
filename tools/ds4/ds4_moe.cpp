@@ -153,6 +153,14 @@ struct Gpu {
     uint8_t* h_dummy = nullptr;   ///< pinned zero blob: a guess outside the arena still costs its DMA
     float* h_x = nullptr;         ///< pinned host copy of x (the H2D source and the CPU tier's input)
     void* h_parts = nullptr;      ///< pinned D2H landing pad for the expert outputs
+    /// pinned staging for launch_group's metadata, one region per group (0 = hits, 1 = PCIe).  The old pageable
+    /// std::vector sources made each cudaMemcpyAsync wait for the stream (s28): the PCIe group's launch blocked the
+    /// host until the hits kernel and every PCIe DMA were done, so the CPU pool started only after them.
+    struct Meta {
+        unsigned long long ptr[kMaxEnt];
+        int32_t start[kMaxEnt + 1], ng, dst[kMaxEnt], tok[kMaxEnt], exp[kMaxEnt];
+    };
+    Meta* h_meta = nullptr;
 
     /// run_chunk (prompt chunks, MiMo prefill): allocated on first use, for up to `c_tok` tokens.  The streamed
     /// experts go through two device halves of `c_half` bytes (copy stream `s_cp` fills one while `s` computes
@@ -206,6 +214,7 @@ struct Gpu {
         if (h_dummy) cudaFreeHost(h_dummy);
         if (h_x) cudaFreeHost(h_x);
         if (h_parts) cudaFreeHost(h_parts);
+        if (h_meta) cudaFreeHost(h_meta);
         for (void* p : {c_x, c_xq, c_parts, c_scratch, c_ptr, c_start, c_ng, c_dst, c_tokv, c_exp, c_stage[0], c_stage[1], c_w, c_out})
             if (p) cudaFree(p);
         for (uint8_t* p : c_bounce)
@@ -788,6 +797,7 @@ bool Ds4MoeTier::init(const Ds4MoeGeom& geom, Ds4BlobSource* blobs, const Ds4Moe
     for (int i = 0; i < 4; ++i) ck(cudaEventCreate(&gp.ev[i]), "event");
     ck(cudaMallocHost((void**) &gp.h_x, (size_t) kMaxTok * H4), "h_x");
     ck(cudaMallocHost(&gp.h_parts, (size_t) kMaxEnt * H4), "h_parts");
+    ck(cudaMallocHost((void**) &gp.h_meta, 2 * sizeof(Gpu::Meta)), "h_meta");
     // Routed-expert LoRA (GLM abliteration): upload each layer's expert deltas once; an all-null host entry stays
     // null, so the grouped path is bit-identical to the plain one on layers without deltas.  d_ent_exp carries the
     // per-entry expert ids the correction kernels read; it is refreshed at every grouped call.
@@ -1389,21 +1399,27 @@ bool gpu_run(Ds4MoeImpl& im, int64_t layer, const int32_t* ids6, const float* w6
     auto launch_group = [&](int w, int n, const std::vector<unsigned long long>& ptr,
                             const std::vector<int32_t>& start, const std::vector<int32_t>& dst,
                             const std::vector<int32_t>& tok) {
-        const int32_t one = n;
-        ck(cudaMemcpyAsync(gp.d_grp_ptr, ptr.data(), sizeof(unsigned long long) * n, cudaMemcpyHostToDevice, gp.s),
+        // pinned sources (Gpu::h_meta): async for real, so neither launch blocks the host.  Region w is not reused
+        // before the layer sync, and the device buffers are stream-ordered (group 1's copies land after group 0 ran).
+        Gpu::Meta& hm = gp.h_meta[w];
+        std::memcpy(hm.ptr, ptr.data(), sizeof(unsigned long long) * n);
+        std::memcpy(hm.start, start.data(), sizeof(int32_t) * (n + 1));
+        hm.ng = n;
+        std::memcpy(hm.dst, dst.data(), sizeof(int32_t) * n);
+        std::memcpy(hm.tok, tok.data(), sizeof(int32_t) * n);
+        ck(cudaMemcpyAsync(gp.d_grp_ptr, hm.ptr, sizeof(unsigned long long) * n, cudaMemcpyHostToDevice, gp.s),
            "grp_ptr");
-        ck(cudaMemcpyAsync(gp.d_grp_start, start.data(), sizeof(int32_t) * (n + 1), cudaMemcpyHostToDevice, gp.s),
+        ck(cudaMemcpyAsync(gp.d_grp_start, hm.start, sizeof(int32_t) * (n + 1), cudaMemcpyHostToDevice, gp.s),
            "grp_start");
-        ck(cudaMemcpyAsync(gp.d_ngroups, &one, sizeof(int32_t), cudaMemcpyHostToDevice, gp.s), "ngroups");
-        ck(cudaMemcpyAsync(gp.d_ent_dst, dst.data(), sizeof(int32_t) * n, cudaMemcpyHostToDevice, gp.s), "ent_dst");
-        ck(cudaMemcpyAsync(gp.d_ent_tok, tok.data(), sizeof(int32_t) * n, cudaMemcpyHostToDevice, gp.s), "ent_tok");
+        ck(cudaMemcpyAsync(gp.d_ngroups, &hm.ng, sizeof(int32_t), cudaMemcpyHostToDevice, gp.s), "ngroups");
+        ck(cudaMemcpyAsync(gp.d_ent_dst, hm.dst, sizeof(int32_t) * n, cudaMemcpyHostToDevice, gp.s), "ent_dst");
+        ck(cudaMemcpyAsync(gp.d_ent_tok, hm.tok, sizeof(int32_t) * n, cudaMemcpyHostToDevice, gp.s), "ent_tok");
         // routed-expert LoRA: the per-entry expert id (dst[i] is a routing index, ids6 its expert) the correction reads
         strata::kernels::NativeExpertLora lo;
         const strata::kernels::NativeExpertLora* plo = nullptr;
         if (layer < (int64_t) gp.lora.size() && gp.lora[(size_t) layer].a_g) {
-            std::vector<int32_t> exp((size_t) n);
-            for (int i = 0; i < n; ++i) exp[(size_t) i] = ids6[dst[(size_t) i]];
-            ck(cudaMemcpyAsync(gp.d_ent_exp, exp.data(), sizeof(int32_t) * n, cudaMemcpyHostToDevice, gp.s), "ent_exp");
+            for (int i = 0; i < n; ++i) hm.exp[i] = ids6[dst[(size_t) i]];
+            ck(cudaMemcpyAsync(gp.d_ent_exp, hm.exp, sizeof(int32_t) * n, cudaMemcpyHostToDevice, gp.s), "ent_exp");
             lo = gp.lora[(size_t) layer];
             lo.x = (const float*) gp.d_x;
             lo.x_stride = (int64_t) H;
@@ -1651,6 +1667,9 @@ bool gpu_run(Ds4MoeImpl& im, int64_t layer, const int32_t* ids6, const float* w6
     }
 
     mark(3);
+    // the card's expert rows come back in the same wait as the layer (s28: was a second D2H + "parts sync")
+    ck(cudaMemcpyAsync(gp.h_parts, gp.d_parts, (size_t) std::max<int64_t>(kMaxParts, K) * (size_t) H * 4,
+                       cudaMemcpyDeviceToHost, gp.s), "d2h parts");
     ck(cudaStreamSynchronize(gp.s), "layer sync");
     if (lru)   // every lookup that was not a VRAM hit is a miss for the admission filter
         for (int64_t k = 0; k < K; ++k)
@@ -1699,9 +1718,6 @@ bool gpu_run(Ds4MoeImpl& im, int64_t layer, const int32_t* ids6, const float* w6
         if (nk > 0 && st.cpu_ms > 0) upd(im.ema_cpu, st.cpu_ms / nk);
         upd(im.ema_hit, st.hit_ms);
     }
-    ck(cudaMemcpyAsync(gp.h_parts, gp.d_parts, (size_t) std::max<int64_t>(kMaxParts, K) * (size_t) H * 4,
-                       cudaMemcpyDeviceToHost, gp.s), "d2h parts");
-    ck(cudaStreamSynchronize(gp.s), "parts sync");
     const float* gpu_parts = (const float*) gp.h_parts;
     mark(5);
     // DS4_CHECK_GPU=1: every card-computed expert recomputed on the CPU from the arena's bytes (diagnostic, slow)
