@@ -24,7 +24,7 @@ Committed on `glm` (local; push with `git push glm glm:main` when Mal says).
 Measured decode **27.2 tok/s** (session start 23.7), prefill ~400; exact ppl chat 5.35 / code 3.65 (the old q5_k
 default was 5.60 / 3.64).  Long prompts fixed (the 19K-token OOM; 100K verified) - see FINDINGS s28 item 1.
 **Decode is PCIe-bound**, not host-latency-bound (s27 corrected): H2D 26 ms/token at ~22 GB/s; kernels 16 ms.
-**Open decisions for Mal:** arena 72 GiB (+~6% decode, MemAvailable ~5 GiB) vs 64 (13-14 GiB); q4_k vs native q6
+**Settled:** arena 72 GiB with q4 is only +1.5% (27.64) at ~5 GiB free -> 64 stays.  **Open for Mal:** q4_k vs native q6
 (+1.5% ppl for +8.8% speed).  **Next levers:** see FINDINGS s28 "Remaining levers"; the q5_k chat anomaly bisect.
 ggml patch: third_party/llama.cpp is untracked - apply tools/glm/patches/*.patch to a fresh copy (GNU /usr/bin/patch;
 anaconda's `patch` binary is corrupt).

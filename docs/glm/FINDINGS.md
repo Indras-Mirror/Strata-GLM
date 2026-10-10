@@ -887,6 +887,7 @@ kernels 16.4 ms/token (dense q5_k matvec 5.8 = the weight-bandwidth floor), **H2
 | fused predict (finish(il) computes predict(il+1)) | +0.4% (noise), kept |
 Bound: `--skip-file 1.0` (drop every file-tier expert) 27.85, 0.3: 27.37 - the arena fill gets that speed without dropping.
 Arena 72 GiB leaves MemAvailable 5 GiB in decode (memguard floor 4) -> shipped 64 GiB (13-14 GiB free).
+With q4_k dense, arena 72 GiB = 27.64 vs 64 GiB 27.23 tok/s (+1.5%) at MemAvailable 5-7 GiB: not worth it, 64 stays.
 
 **4. The shipped q5_k dense cost +6.2% chat ppl** (exact math: skips 0, eval 4K tokens, bit-identical on rerun):
 | dense | chat | code |
