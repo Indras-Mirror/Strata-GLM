@@ -17,6 +17,18 @@ Read first, in this order: this file; `docs/glm/PLAN.md` (target files, port ord
 `docs/glm/FINDINGS.md`; then the DS4 docs we build on: `docs/ds4/RESUME_PROMPT.md` (rules, gates, lessons),
 `docs/ds4/ENGINE_DENSE.md`, `docs/ds4/ENGINE_MOE.md`; `git log --oneline -15`.
 
+## State (2026-10-10 NIGHT-2, s28) - **CURRENT** (supersedes LATE below; read FINDINGS s28 first)
+Committed on `glm` (local; push with `git push glm glm:main` when Mal says).
+**Shipped serve config** (tools/glm/serve/strata-glm-maya-abl-512k.json; the wrapper default): Maya-S-v2 + LoRA,
+512K, chunk 4096, margin 7.5, vram-grow 1.5, **--pf-b 1.0, --dense-requant q4_k, --arena-gib 64** (+ the s26 flags).
+Measured decode **27.2 tok/s** (session start 23.7), prefill ~400; exact ppl chat 5.35 / code 3.65 (the old q5_k
+default was 5.60 / 3.64).  Long prompts fixed (the 19K-token OOM; 100K verified) - see FINDINGS s28 item 1.
+**Decode is PCIe-bound**, not host-latency-bound (s27 corrected): H2D 26 ms/token at ~22 GB/s; kernels 16 ms.
+**Open decisions for Mal:** arena 72 GiB (+~6% decode, MemAvailable ~5 GiB) vs 64 (13-14 GiB); q4_k vs native q6
+(+1.5% ppl for +8.8% speed).  **Next levers:** see FINDINGS s28 "Remaining levers"; the q5_k chat anomaly bisect.
+ggml patch: third_party/llama.cpp is untracked - apply tools/glm/patches/*.patch to a fresh copy (GNU /usr/bin/patch;
+anaconda's `patch` binary is corrupt).
+
 ## State (2026-10-10 LATE) - **CURRENT: Maya-S-v2 is the model; s26 stack built; gate 4 (final) may be running** (supersedes NIGHT)
 **PUSHED to Indras-Mirror/Strata-GLM main** (2026-10-10 late, `a864dfad`; earlier local-only notes below are stale).
 Read FINDINGS s25d + s26 + **s27** first.

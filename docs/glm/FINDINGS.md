@@ -857,3 +857,46 @@ decode : 256 tokens, 255 forward passes in 12.41 s = 20.55 tok/s
 === maya-final done 20:08:14 ===
 ```
 - **512K + chunk 6144 is a trap**: margin 10 exceeds the VRAM free after the dense half at 512K, so the elastic cache never engages (no grow_cache) and decode runs with no VRAM experts (20.55 tok/s). The 512K serve config uses chunk 4096 / margin 7.5 (24.55 tok/s, prefill ~389). 6K chunks are for 300K only.
+
+## s28 (2026-10-10 night): long-prompt OOM fixed; decode is PCIe-bound (s27 corrected); 23.7 -> 27.2 tok/s at BETTER quality
+All runs: Maya-S-v2 + LoRA, 512K serve flags (chunk 4096, margin 7.5, vram-grow 1.5), chat_code6k 12.7K prompt -> 256
+greedy tokens, scripts bench/glm-2026-10-09/{oom-repro,dec-fused,ppl-requant,ppl-rerun,nsys-node}.sh.  Noise ~+-2%.
+
+**1. The serve crash (Mal's 19K-token request, exit 134) was a VRAM OOM in cudaGraphInstantiate, not RAM.** ggml-cuda
+captures a CUDA graph on the 2nd identical call, so the 4th 4096-token chunk (2nd at cap 16384) instantiated a graph
+of a whole prefill pass (~1.5 GiB) into the ~0.9 GiB the elastic cache leaves.  Gate 4's 12.7K prompt never got a
+2nd full chunk at one cap.  Fixes: no CUDA graph for a pass whose MUL_MAT takes > 16 columns
+(GGML_CUDA_GRAPH_MAX_BATCH; third_party is untracked -> tools/glm/patches/0001-*.patch), and GlmDense::safe_chunk
+halves the chunk per cap doubling past cap x n = 65536 x 4096 (the indexer's [pools x tokens] scratch; -128/-256 MiB
+per doubling measured).  50K prompt: OOM -> OK (prefill 382 -> 401 tok/s, no graph build); 100K: OK, 332 tok/s,
+headroom flat 488 MiB past 64K.  GLM_VRAM_TRACE=1 prints free VRAM per chunk.
+
+**2. s27 was wrong twice.**  (a) The CPU pool already overlaps the card: DS4_TIER_PROF per layer call = launch 0.042,
+pool 0.344, then 0.109 ms still waiting on the card -> the card path is the critical one ("wall = hits+pcie+pool" was
+a coincidence).  Pinned launch_group metadata (pageable-copy theory) and async dense calls (8 -> ~3 syncs/layer):
+correct, kept, +0% (23.74 / 23.30 / 23.52).  (b) nsys --cuda-graph-trace=node (tools/glm/nsys_decode_anatomy.py):
+kernels 16.4 ms/token (dense q5_k matvec 5.8 = the weight-bandwidth floor), **H2D copy engine busy 26.4 ms/token
+(~22 GB/s = the PCIe 4.0 ceiling)**.  Decode is PCIe-bound (expert prefetch + PCIe misses) + NVMe file reads.
+
+**3. What paid (decode tok/s):**
+| change | before -> after |
+|---|---|
+| `--pf-b 1.0` (was 1.43; sweep 0.7 24.0, 1.0 25.18/25.11, 1.2 24.4, 1.43 mean 23.7 over 4, 2.0 22.8) | 23.7 -> 25.1 |
+| soft-pruned experts fill the arena (census-ranked after the kept set; they were NVMe reads, ~4 ms/token) | 25.1 -> 26.2 (64 GiB) / 27.9 (72 GiB) |
+| `--dense-requant q4_k` instead of q5_k (q6 native 25.0 at the same flags) | -> 27.2 |
+| fused predict (finish(il) computes predict(il+1)) | +0.4% (noise), kept |
+Bound: `--skip-file 1.0` (drop every file-tier expert) 27.85, 0.3: 27.37 - the arena fill gets that speed without dropping.
+Arena 72 GiB leaves MemAvailable 5 GiB in decode (memguard floor 4) -> shipped 64 GiB (13-14 GiB free).
+
+**4. The shipped q5_k dense cost +6.2% chat ppl** (exact math: skips 0, eval 4K tokens, bit-identical on rerun):
+| dense | chat | code |
+|---|---|---|
+| q6_k native | 5.2727 | 3.6014 |
+| q5_k | 5.5983 (+6.2%) | 3.6405 (+1.1%) |
+| q4_k | 5.3549 (+1.6%) | 3.6544 (+1.5%) |
+q5_k worse than q4_k on chat is unexplained (requant = Q6_K -> f32 -> ggml_quantize_chunk, no imatrix) - a per-tensor
+bisect would find it.  Shipped: q4_k (faster than q5 AND better chat).  `--dense-requant none` = native q6 (25.0).
+
+**Remaining levers (each small):** arena 72 GiB if RAM allows (+~6%); router/hc F32 -> F16 (<= 0.6 ms, changes top-k
+numerics); elementwise fusion (~5 ms/token of tiny kernels, ggml-level); CPU pool ~0.36 ms/expert vs ~0.2 floor (lets
+--pcie auto move misses off the saturated bus); prefetch further ahead (the bus idles ~14 ms/token).
